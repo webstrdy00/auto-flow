@@ -1,0 +1,55 @@
+# Agent runtime and local tools
+.gjc/
+.aside/
+
+# Local planning records (not published to GitHub)
+/docs/
+
+# Dependencies and generated output
+node_modules/
+dist/
+build/
+release/
+coverage/
+playwright-report/
+test-results/
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*.json
+credentials*.enc*
+secrets*.json
+
+# Browser authentication and profiles
+.auth/
+playwright/.auth/
+profiles/
+browser-data/
+user-data/
+storage-state*.json
+storageState*.json
+cookies*.json
+
+# Private application data and browser evidence
+data/
+artifacts/
+screenshots/
+downloads/
+logs/
+app-live-check-result.json
+app-live-check.png
+*.log
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+
+# Machine-local files
+.DS_Store
+Thumbs.db
