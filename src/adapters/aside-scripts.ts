@@ -59,7 +59,7 @@ export function parseDisplayedPrice(text: string): string | null {
   const remaining = text.normalize('NFC').replace(/\s+/g, ' ').trim()
     .replace(new RegExp(`(?:개당\\s*)?${money}\\s*${suffixLabels}(?=\\s|$|[,.])`, 'g'), ' ')
     .replace(new RegExp(`(?:예상\\s*|최대\\s*)?${labels}\\s*[:：]?\\s*${money}`, 'g'), ' ')
-    .replace(new RegExp(`(?:\\d+(?:\\.\\d+)?\\s*)?(?:개|입|매|장|정|팩|펙|봉|병|통|박스|g|kg|ml|mL|L)\\s*당\\s*${money}`, 'g'), ' ');
+    .replace(new RegExp(`(?:\\d+(?:\\.\\d+)?\\s*)?(?:개|입|매|장|정|팩|펙|봉|병|통|박스|g|kg|ml|mL|L|m)\\s*당\\s*${money}`, 'g'), ' ');
   const values = [...remaining.matchAll(new RegExp(money, 'g'))].map((match) => match[0].replace(/\s+/g, ''));
   if (values.some((value) => !/^(?:0|[1-9]\d*|[1-9]\d{0,2}(?:,\d{3})+)원$/.test(value))) return null;
   const prices = new Set(values);
@@ -130,7 +130,7 @@ async function observe(page, channel) {
   if (!knownPath || !clean(await page.title())) fail('지원되는 대상 화면과 제목을 확인할 수 없습니다. Aside에서 대상 화면을 열어 주세요.');
   // Read scoped controls only: the Toss homepage also contains private settlement data.
   const view = await snapshot(page, { interactive: true, selector: 'button, [role="button"], a[href], [role="dialog"], iframe' });
-  if (/(?:자동입력 방지|보안 확인|본인 인증|오늘 조회 한도를 모두 사용|쉐어링크 발급이 제한|로그인이 필요|nid\.naver\.com|captcha|challenge)/i.test(view.tree)) {
+  if (/(?:자동입력 방지|보안 확인|본인 인증|오늘 조회 한도를 모두 사용|쉐어링크 발급이 제한|로그인이 필요|접근이 거부|접근 권한|권한이 없|permission denied|access denied|nid\.naver\.com|captcha|challenge)/i.test(view.tree)) {
     fail('보안 확인·로그인·이용 제한을 감지했습니다. 자동 우회하지 않으며 수동 확인이 필요합니다.');
   }
   return url.href;
@@ -157,7 +157,6 @@ async function regions(page, detail, expectedName = '') {
     const nameSelector = 'button, [role="button"], a[href], h1, h2, h3, [data-testid="product-name"], [data-testid="product-title"], [class*="productName"], [class*="product-name"], [class*="product_title"], img[alt]'
       + (detail ? (expectedName ? ', span' : ', span.pc14-wed5fi0.xh8yej3') : '');
     const controls = [...document.querySelectorAll(issueSelector)];
-    const nameControls = [...document.querySelectorAll(nameSelector)];
     const issues = controls.filter((element) => visible(element) && normalize(element.textContent) === '링크 발급');
     if (issues.length > 100 || (detail && issues.length !== 1)) return null;
     const unavailable = /품절|판매\s*(?:종료|중지)|구매\s*불가/;
@@ -201,15 +200,34 @@ async function regions(page, detail, expectedName = '') {
         }
         if (names.size !== 1) continue;
         const [name, nameElement] = [...names][0];
+        const navigation = [...root.querySelectorAll('button, [role="button"]')].filter((element) => visible(element)
+          && normalize(element.getAttribute('aria-label') || element.textContent).replace(/,\s*품절$/, '') === name);
+        const fullNameControls = navigation.filter((element) => normalize(element.textContent).includes(name));
+        const preferred = fullNameControls.length ? fullNameControls : navigation;
+        const navigationElement = preferred.length === 1 ? preferred[0] : null;
+        const section = !detail && root.closest('main section');
+        const descriptions = section ? [...section.querySelectorAll('button[aria-label], [role="button"][aria-label]')]
+          .filter((element) => visible(element) && / 설명 보기$/.test(normalize(element.getAttribute('aria-label')))) : [];
+        const sectionName = descriptions.length === 1
+          ? normalize(descriptions[0].getAttribute('aria-label')).replace(/ 설명 보기$/, '') : '';
+        const titles = section ? [...section.querySelectorAll('[data-sentry-component="ModuleTitle"]')].filter(visible) : [];
+        if (section && (!sectionName || sectionName.length > 200 || titles.length !== 1 || normalize(titles[0].textContent) !== sectionName)) continue;
         const text = readable(root);
         if (text.length > (detail ? 6000 : 5000)) continue;
         const links = [...root.querySelectorAll('a[href]')];
         if (links.length > 20) continue;
+        // Bind the inspected node, not its position or a page-wide name match.
+        const navigationToken = navigationElement ? crypto.randomUUID() : '';
+        if (navigationElement) navigationElement.setAttribute('data-auto-flow-control', navigationToken);
         card = {
           name, priceText: text.replace(name, ' [상품명] '), soldOut: detailUnavailable || unavailable.test(text)
             || unavailable.test(nameElement.getAttribute('aria-label') ?? ''),
           hrefs: links.map((link) => link.href).filter((href) => href.length <= 2048),
-          nameIndex: nameControls.indexOf(nameElement), canNavigate: nameElement.matches('button, [role="button"]'),
+          sectionName,
+          navigationName: navigationElement ? normalize(navigationElement.getAttribute('aria-label') || navigationElement.textContent) : '',
+          navigationToken,
+          navigationHasName: fullNameControls.length > 0,
+          canNavigate: !!navigationElement,
           issueIndex: controls.indexOf(issue), enabled: !issue.disabled && issue.getAttribute('aria-disabled') !== 'true',
         };
         break;
@@ -232,17 +250,52 @@ function productFrom(region, source) {
   return { id: source.id, name: region.name, price: region.price, soldOut: region.soldOut,
     sourceUrl: source.url, checkedAt: new Date().toISOString(), facts: '', shareUrl: '' };
 }
+function canonicalCard(cards) {
+  if (!cards.length) return null;
+  const sections = new Set(cards.map((card) => card.sectionName));
+  if (sections.size !== cards.length || (cards.length > 1 && sections.has(''))) fail('같은 영역에 같은 상품명의 카드가 여러 개입니다. 상품을 추측하지 않습니다.');
+  const identities = new Set(cards.map((card) => JSON.stringify([clean(card.name), card.price, card.soldOut, card.source?.id ?? ''])));
+  if (identities.size !== 1) fail('같은 상품명의 카드 정보가 서로 다릅니다. 상품을 추측하지 않습니다.');
+  return [...cards].sort((left, right) => left.sectionName < right.sectionName ? -1 : left.sectionName > right.sectionName ? 1 : 0)[0];
+}
+function productScopeSelector(sectionName) {
+  if (!sectionName) return 'main';
+  const label = JSON.stringify(sectionName + ' 설명 보기');
+  return 'main section:has(button[aria-label=' + label + '], [role="button"][aria-label=' + label + '])';
+}
+function productScope(page, sectionName) {
+  return page.locator(productScopeSelector(sectionName));
+}
+async function productControl(page, region) {
+  const scope = productScope(page, region.sectionName);
+  if (await scope.count() !== 1) fail('수집 대상의 상품 영역이 바뀌었거나 모호합니다. 다른 영역으로 대체하지 않습니다.');
+  if (!/^[a-f0-9-]{36}$/.test(region.navigationToken)) fail('검증한 상품 버튼의 식별자를 확인하지 못했습니다.');
+  const control = page.locator(productScopeSelector(region.sectionName) + ' [data-auto-flow-control=' + JSON.stringify(region.navigationToken) + ']');
+  const count = await control.count();
+  if (count > 1) fail('같은 상품명의 버튼이 여러 개입니다. 상품을 추측하지 않으며 수동 확인이 필요합니다.');
+  return count === 1 ? control : null;
+}
+`;
+
+// Collection requests do not carry issuance/preflight-only helpers.
+const productPreflight = String.raw`
 async function checkedProduct(page, product) {
   const source = parseTossProductUrl(product.sourceUrl);
   await observe(page, 'toss');
   if (parseTossProductUrl(page.url())?.id !== source.id) {
     if (input.useWorkTabs === true) {
       const cards = await regions(page, false);
-      const card = cards.find((candidate) => clean(candidate.name) === clean(product.name)
-        && (!candidate.source || candidate.source.id === source.id));
+      const named = cards.filter((candidate) => clean(candidate.name) === clean(product.name));
+      const known = named.filter((candidate) => candidate.source);
+      if (known.length && known.length !== named.length) fail('같은 상품명의 알려진 ID와 미확인 카드가 섞여 있습니다. 상품을 추측하지 않습니다.');
+      const matching = known.length ? known.filter((candidate) => candidate.source.id === source.id) : named;
+      if (matching.some((candidate) => candidate.soldOut || clean(candidate.price) !== clean(product.price))) fail('상품 가격 또는 판매 상태가 바뀌었습니다. 다시 확인하세요.');
+      const card = canonicalCard(matching);
       if (!card || !card.canNavigate) fail('작업 탭의 현재 목록에서 승인 상품을 선택할 수 없습니다. Aside에서 해당 상세 화면을 열고 기존 탭 모드로 확인하세요.');
       if (card.soldOut || clean(card.price) !== clean(product.price)) fail('상품 가격 또는 판매 상태가 바뀌었습니다. 다시 확인하세요.');
-      await page.locator('button, [role="button"], a[href], h1, h2, h3, [data-testid="product-name"], [data-testid="product-title"], [class*="productName"], [class*="product-name"], [class*="product_title"], img[alt]').nth(card.nameIndex).click();
+      const control = await productControl(page, card);
+      if (!control) fail('승인 상품의 버튼이 현재 목록에서 사라졌습니다. 다시 확인하세요.');
+      await control.click();
       await observe(page, 'toss');
     } else await navigate(page, 'toss', source.url);
   }
@@ -267,7 +320,7 @@ return null;
 `, channel === 'naver' ? ['isNaverHomeUrl'] : []);
 }
 
-export interface ScanCandidate { name: string; sourceUrl: string; originalUrl: string }
+export interface ScanCandidate { name: string; sourceUrl: string; originalUrl: string; sectionName: string; price: string }
 export interface ScanPlan { products: Product[]; candidates: ScanCandidate[] }
 
 export function buildScanPlanScript(useWorkTabs = false): string {
@@ -283,7 +336,9 @@ const initial = await regions(page, false);
 const candidates = new Map();
 for (const region of initial) {
   const sourceUrl = region.source?.url ?? '';
-  candidates.set(region.name + '|' + sourceUrl, { name: region.name, sourceUrl, originalUrl });
+  const key = JSON.stringify([region.sectionName, region.name]);
+  if (candidates.has(key)) fail('같은 영역에 같은 상품명의 카드가 여러 개입니다. 상품을 추측하지 않습니다.');
+  candidates.set(key, { name: region.name, sourceUrl, originalUrl, sectionName: region.sectionName, price: region.price });
 }
 return { products: [], candidates: [...candidates.values()] };
 `, ['parseTossProductUrl', 'parseDisplayedPrice'], true);
@@ -297,22 +352,47 @@ export function buildScanScript(candidate: ScanCandidate, useWorkTabs = false): 
   await observe(page, 'toss');
   if (page.url() !== originalUrl) fail('수집 중 상품 목록이 바뀌었습니다. 자동 수집을 중단했습니다.');
   const current = await regions(page, false);
-  let region = current.find((candidate) => clean(candidate.name) === clean(input.name)
-    && (!input.sourceUrl || candidate.source?.url === input.sourceUrl));
-  if (!region) fail('수집 대상 상품이 현재 목록에서 사라졌습니다. 다시 확인해 주세요.');
+  await observe(page, 'toss');
+  if (page.url() !== originalUrl) fail('수집 중 상품 목록이 바뀌었습니다. 자동 수집을 중단했습니다.');
+  const scoped = current.filter((candidate) => candidate.sectionName === input.sectionName);
+  const named = scoped.filter((candidate) => clean(candidate.name) === clean(input.name));
+  if (input.sourceUrl && scoped.some((candidate) =>
+    (candidate.source?.url === input.sourceUrl && clean(candidate.name) !== clean(input.name))
+    || (clean(candidate.name) === clean(input.name) && candidate.source && candidate.source.url !== input.sourceUrl))) {
+    fail('수집 대상의 상품 ID 또는 상품명이 바뀌었습니다. 다른 상품으로 대체하지 않습니다.');
+  }
+  if (input.sectionName && await productScope(page, input.sectionName).count() !== 1) fail('수집 대상의 상품 영역이 사라졌습니다. 다른 영역으로 대체하지 않습니다.');
+  if (!named.length) return { skipped: 'missing' };
+  if (named.length !== 1) fail('같은 상품명의 수집 대상이 여러 개입니다. 상품을 추측하지 않습니다.');
+  let region = named[0];
+  if (region.price !== input.price) fail('수집 대상의 상품 가격이 바뀌었습니다. 다시 수집해 주세요.');
   let source = region.source;
-  if (!source) {
-    if (!region.canNavigate || region.nameIndex < 0) fail('상품 UI에서 상세 화면을 여는 상품명 버튼을 확인할 수 없습니다. 상세 화면을 직접 열어 주세요.');
-    await page.locator('button, [role="button"], a[href], h1, h2, h3, [data-testid="product-name"], [data-testid="product-title"], [class*="productName"], [class*="product-name"], [class*="product_title"], img[alt]').nth(region.nameIndex).click();
+  if (region.canNavigate) {
+    const expectedSource = source?.url || input.sourceUrl;
+    const control = await productControl(page, region);
+    if (!control) {
+      const refreshed = await regions(page, false);
+      await observe(page, 'toss');
+      if (page.url() !== originalUrl) fail('수집 중 상품 목록이 바뀌었습니다. 자동 수집을 중단했습니다.');
+      if (input.sectionName && await productScope(page, input.sectionName).count() !== 1) fail('수집 대상의 상품 영역이 사라졌습니다. 다른 영역으로 대체하지 않습니다.');
+      if (refreshed.some((candidate) => candidate.sectionName === input.sectionName && (clean(candidate.name) === clean(input.name)
+        || (input.sourceUrl && candidate.source?.url === input.sourceUrl)))) {
+        fail('수집 대상은 있지만 상품명 버튼이 바뀌었습니다. 다른 상품으로 대체하지 않습니다.');
+      }
+      return { skipped: 'missing' };
+    }
+    await control.click();
     await observe(page, 'toss');
     source = parseTossProductUrl(page.url());
     if (!source) fail('상품 UI에서 숫자 상품 ID를 확인하지 못했습니다. 주소를 추측하지 않으며 수동 확인이 필요합니다.');
+    if (expectedSource && source.url !== expectedSource) fail('상품 카드와 상세 화면의 상품 ID가 다릅니다. 다른 상품으로 대체하지 않습니다.');
     const [detail] = await regions(page, true, region.name);
     if (clean(detail.name) !== clean(region.name)) fail('상품 카드와 상세 화면의 상품명이 다릅니다.');
+    if (detail.price !== region.price) fail('상품 카드와 상세 화면의 상품 가격이 다릅니다. 다시 수집해 주세요.');
     region = { ...detail, soldOut: detail.soldOut || region.soldOut };
     await navigate(page, 'toss', originalUrl);
     if (page.url() !== originalUrl) fail('상품 조회 후 원래 목록으로 돌아오지 못했습니다.');
-  }
+  } else fail('상품 UI에서 상세 화면을 여는 상품명 버튼을 확인할 수 없습니다. 상세 화면을 직접 열어 주세요.');
   return productFrom(region, source);
 `, ['parseTossProductUrl', 'parseDisplayedPrice'], true);
 }
@@ -349,6 +429,6 @@ const links = copied.match(/https:\/\/[^\s<>"']+/g) ?? [];
 if (links.length !== 1 || !isTossShareUrl(links[0])) fail('새 복사 결과에서 안전한 토스 링크 하나를 확인하지 못했습니다. 자동 재발급하지 않습니다.');
 return links[0];
 `;
-  return script(input, preflight + (issue ? issuance : 'return null;'), issue
+  return script(input, productPreflight + preflight + (issue ? issuance : 'return null;'), issue
     ? ['parseTossProductUrl', 'parseDisplayedPrice', 'isTossShareUrl'] : ['parseTossProductUrl', 'parseDisplayedPrice'], true);
 }

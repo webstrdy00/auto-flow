@@ -62,6 +62,9 @@ test('price parsing separates observed commission text without discarding the ac
   assert.equal(parseDisplayedPrice('27,000원\n배송비 3,000원'), '27,000원');
   assert.equal(parseDisplayedPrice('상세 정보 [상품명] 원산지: 상세페이지 참조 74 % 32,160원 선착순특가 1 정 당 179원 · 무료배송 수수료 8 %'), '32,160원');
   assert.equal(parseDisplayedPrice('1 정 당 179원'), null);
+  assert.equal(parseDisplayedPrice('상세 정보 [상품명] 33 % 17,950원 최대할인가 10 m 당 100원 · 무료배송 수수료 8 %'), '17,950원');
+  assert.equal(parseDisplayedPrice('10 m 당 100원'), null);
+  assert.equal(parseDisplayedPrice('17,950원 18,000원 10 m 당 100원'), null);
   assert.equal(parseDisplayedPrice('27,000원 29,000원'), null, 'Unmarked original and sale prices must not be guessed');
   assert.equal(parseDisplayedPrice('27,00원'), null, 'Malformed prices must not be partially parsed');
   assert.equal(parseDisplayedPrice('27 , 000원'), null, 'Separated numeric fragments must not become a false price');
@@ -107,12 +110,17 @@ interface TossOptions {
 }
 
 function tossSandbox(options: TossOptions = {}) {
+  const navigationToken = '00000000-0000-4000-8000-000000000001';
   let currentUrl = options.initialUrl ?? product.sourceUrl;
   const events: string[] = [];
   const page = {
     url: () => currentUrl,
     title: async () => '토스 쇼핑 쉐어링크',
-    getByRole: () => ({ first: () => ({ waitFor: async () => {} }) }),
+    getByRole: (_role: string, control: { name: string; exact: boolean }) => {
+      assert.equal(control.name, '링크 발급');
+      assert.equal(control.exact, true);
+      return { first: () => ({ waitFor: async () => {} }) };
+    },
     goto: async (url: string) => { events.push('goto'); currentUrl = options.redirectUrl ?? url; },
 
     evaluate: async (fn: (...args: never[]) => unknown, arg?: { detail?: boolean; expectedName?: string }) => {
@@ -120,7 +128,8 @@ function tossSandbox(options: TossOptions = {}) {
         events.push('read-product');
         return [{ name: options.name ?? product.name, priceText: options.priceText ?? product.price,
           soldOut: options.soldOut ?? false, hrefs: options.noProductHref ? [] : [product.sourceUrl],
-          nameIndex: 0, canNavigate: true, issueIndex: 1, enabled: true }];
+          sectionName: '', navigationName: options.name ?? product.name, navigationHasName: true,
+          navigationToken, canNavigate: true, issueIndex: 1, enabled: true }];
       }
       if (fn.toString().includes('crypto.randomUUID')) {
         events.push('clipboard-write');
@@ -133,10 +142,25 @@ function tossSandbox(options: TossOptions = {}) {
       }
       assert.fail('Unexpected browser evaluation');
     },
-    locator: (selector: string) => ({ nth: (index: number) => ({ click: async () => {
-      if (selector === 'button, [role="button"]') { assert.equal(index, 1); events.push('issue'); }
-      else { assert.equal(index, 0); events.push('open-detail'); currentUrl = product.sourceUrl; }
-    } }) }),
+    locator: (selector: string) => {
+      if (selector === 'button, [role="button"]') return {
+        nth: (index: number) => ({ click: async () => {
+          assert.equal(selector, 'button, [role="button"]');
+          assert.equal(index, 1);
+          events.push('issue');
+        } }),
+      };
+      assert.ok(selector === 'main' || selector === `main [data-auto-flow-control="${navigationToken}"]`,
+        'Product lookup must use the verified node token in a page-level CSS selector');
+      return {
+        count: async () => 1,
+        click: async () => {
+          assert.equal(selector, `main [data-auto-flow-control="${navigationToken}"]`);
+          events.push('open-detail');
+          currentUrl = product.sourceUrl;
+        },
+      };
+    },
   };
   const runner = scriptRunner({
     listBrowserTabs: async () => options.tabs ?? [{ targetId: 'toss', url: currentUrl }],
@@ -193,6 +217,7 @@ test('discarded or unloaded tabs fail before CDP attachment and never wake user 
   for (const options of [{ discarded: true }, { status: 'unloaded' }, { status: 'loading' }]) {
     const sandbox = tossSandbox(options);
     await assert.rejects(new BrowserAutomation(sandbox.runner).open('toss'), /언로드|로딩/);
+    await assert.rejects(new BrowserAutomation(sandbox.runner).scanProducts(() => assert.fail('Sleeping tabs cannot produce verified products')), /언로드|로딩/);
     assert.deepEqual(sandbox.events, []);
   }
 });
@@ -239,7 +264,8 @@ test('product preflight fails for price changes, ambiguous prices, sold-out stat
 
 test('scan supports a manually selected detail and discovers missing IDs through product-name UI only', async () => {
   const detail = tossSandbox();
-  const [observed] = await new BrowserAutomation(detail.runner).scanProducts();
+  const { products: [observed], skipped } = await new BrowserAutomation(detail.runner).scanProducts();
+  assert.deepEqual(skipped, []);
   assert.equal(observed!.id, product.id);
   assert.equal(observed!.name, product.name);
   assert.equal(observed!.price, product.price);
@@ -248,7 +274,7 @@ test('scan supports a manually selected detail and discovers missing IDs through
   assert.ok(Number.isFinite(Date.parse(observed!.checkedAt)));
   assert.ok(!detail.events.includes('goto'));
   const list = tossSandbox({ initialUrl: 'https://sharelink.toss.im/home', noProductHref: true });
-  assert.equal((await new BrowserAutomation(list.runner).scanProducts())[0]!.sourceUrl, product.sourceUrl);
+  assert.equal((await new BrowserAutomation(list.runner).scanProducts()).products[0]!.sourceUrl, product.sourceUrl);
   assert.equal(list.events.filter((event) => event === 'open-detail').length, 1);
   assert.equal(list.events.filter((event) => event === 'goto').length, 1);
   assert.ok(!list.events.includes('issue'));
@@ -258,16 +284,137 @@ test('list collection executes a bounded plan and each product in separate REPL 
   const first = { ...product, name: '첫 번째 상품', shareUrl: '' };
   const second = { ...product, id: '12345', sourceUrl: 'https://sharelink.toss.im/links/products/12345', name: '두 번째 상품', shareUrl: '' };
   const replies: unknown[] = [
-    { products: [], candidates: [first, second].map(p => ({ name: p.name, sourceUrl: '', originalUrl: 'https://sharelink.toss.im/home' })) },
+    { products: [], candidates: [first, second].map(p => ({ name: p.name, sourceUrl: '', originalUrl: 'https://sharelink.toss.im/home', sectionName: '', price: p.price })) },
     first, second,
   ];
   const scripts: string[] = [];
   const runner: AsideRunner = async <T>(script: string) => { scripts.push(script); return replies.shift() as T; };
-  assert.deepEqual(await new BrowserAutomation(runner).scanProducts(), [first, second]);
+  assert.deepEqual(await new BrowserAutomation(runner).scanProducts(), { products: [first, second], skipped: [] });
   assert.equal(scripts.length, 3);
   assert.ok(scripts[1]!.includes('첫 번째 상품'));
   assert.ok(!scripts[1]!.includes('두 번째 상품'));
   assert.ok(scripts[2]!.includes('두 번째 상품'));
+});
+
+test('same-ID duplicate presentations merge sold-out stock conservatively in either section order', async () => {
+  for (const stock of [[true, false], [false, true]]) {
+    const observed = stock.map(soldOut => ({ ...product, shareUrl: '', soldOut }));
+    const before = structuredClone(observed);
+    const replies: unknown[] = [
+      { products: [], candidates: observed.map((item, index) => ({
+        name: item.name, sourceUrl: item.sourceUrl, price: item.price,
+        originalUrl: 'https://sharelink.toss.im/links/best-ranking',
+        sectionName: index === 0 ? '오늘만 이 가격에 살 수 있는 하루특가' : '지금 많이 팔리는 BEST',
+      })) },
+      ...observed,
+    ];
+    let calls = 0;
+    const saved: Product[] = [];
+    const runner: AsideRunner = async <T>() => { calls++; return replies.shift() as T; };
+    const result = await new BrowserAutomation(runner).scanProducts(item => saved.push(item));
+    assert.deepEqual(result, { products: [{ ...product, shareUrl: '', soldOut: true }], skipped: [] });
+    assert.deepEqual(saved.map(item => item.soldOut), [stock[0], true]);
+    assert.deepEqual(saved[saved.length - 1], result.products[0], 'The last saved callback must retain conservative stock');
+    assert.deepEqual(observed, before, 'Merging must not mutate the original verified receipts');
+    assert.equal(calls, 3);
+  }
+});
+
+test('same-ID duplicate presentations still reject differing verified names or prices after the first callback', async () => {
+  const first = { ...product, shareUrl: '' };
+  for (const second of [{ ...first, name: '다른 검증 상품' }, { ...first, price: '15,900원' }]) {
+    const replies: unknown[] = [
+      { products: [], candidates: [first, second].map((item, index) => ({
+        name: item.name, sourceUrl: item.sourceUrl, price: item.price,
+        originalUrl: 'https://sharelink.toss.im/links/best-ranking',
+        sectionName: index === 0 ? '오늘만 이 가격에 살 수 있는 하루특가' : '지금 많이 팔리는 BEST',
+      })) },
+      first, second,
+    ];
+    const saved: Product[] = [];
+    const runner: AsideRunner = async <T>() => replies.shift() as T;
+    await assert.rejects(new BrowserAutomation(runner).scanProducts(item => saved.push(item)), /수집 중 같은 상품의 정보가 바뀌었습니다/);
+    assert.deepEqual(saved, [first]);
+  }
+});
+
+test('structured missing candidates preserve verified products, report omissions and continue without retry', async () => {
+  const first = { ...product, shareUrl: '' };
+  const last = { ...first, id: '12345', sourceUrl: 'https://sharelink.toss.im/links/products/12345', name: '마지막 검증 상품' };
+  const replies: unknown[] = [
+    { products: [], candidates: [first.name, '사라진 검증 상품', last.name].map(name => ({ name, sourceUrl: '', originalUrl: 'https://sharelink.toss.im/links/best-ranking', sectionName: '', price: product.price })) },
+    first, { skipped: 'missing' }, last,
+  ];
+  let calls = 0;
+  const saved: Product[] = [];
+  const runner: AsideRunner = async <T>() => { calls++; return replies.shift() as T; };
+  const result = await new BrowserAutomation(runner).scanProducts(item => saved.push(item));
+  assert.deepEqual(result, { products: [first, last], skipped: [{ name: '사라진 검증 상품', reason: 'missing' }] });
+  assert.deepEqual(saved, [first, last]);
+  assert.equal(calls, 4);
+});
+
+test('an all-missing scan returns zero products with explicit omissions, not a fabricated collection success', async () => {
+  const replies: unknown[] = [
+    { products: [], candidates: [{ name: product.name, sourceUrl: '', originalUrl: 'https://sharelink.toss.im/home', sectionName: '', price: product.price }] },
+    { skipped: 'missing' },
+  ];
+  const runner: AsideRunner = async <T>() => replies.shift() as T;
+  assert.deepEqual(await new BrowserAutomation(runner).scanProducts(() => assert.fail('No missing product may be saved')), {
+    products: [], skipped: [{ name: product.name, reason: 'missing' }],
+  });
+});
+
+test('fatal collection errors keep only previously validated callbacks and stop before later candidates', async () => {
+  for (const message of ['로그인이 필요합니다', 'permission denied', 'Page.enable timeout', 'AF:상품이 사라졌습니다', 'AF:현재 표시 가격 하나를 확인할 수 없습니다']) {
+    const first = { ...product, shareUrl: '' };
+    const candidates = [first.name, '실패하는 검증 상품', '실행하면 안 되는 상품'].map(name => ({ name, sourceUrl: '', originalUrl: 'https://sharelink.toss.im/home', sectionName: '', price: product.price }));
+    const saved: Product[] = [];
+    let calls = 0;
+    const runner: AsideRunner = async <T>() => {
+      calls++;
+      if (calls === 1) return { products: [], candidates } as T;
+      if (calls === 2) return first as T;
+      throw new Error(message);
+    };
+    await assert.rejects(new BrowserAutomation(runner).scanProducts(item => saved.push(item)), error => error instanceof Error && error.message === message);
+    assert.deepEqual(saved, [first]);
+    assert.equal(calls, 3);
+  }
+});
+
+test('unvalidated receipts and candidate identity mismatches never reach the per-product callback', async () => {
+  for (const invalid of [
+    { ...product, shareUrl: '', id: '999' },
+    { ...product, shareUrl: '', name: '다른 검증 상품' },
+    { ...product, shareUrl: '', id: '999', sourceUrl: 'https://sharelink.toss.im/links/products/999' },
+    { ...product, shareUrl: '', checkedAt: 'not-a-date' },
+    { ...product, shareUrl: '', price: '15,900원' },
+    { ...product, shareUrl: '', price: '14,900원 15,900원' },
+    { skipped: 'changed' }, { skipped: 'missing', product },
+    '상품이 사라졌습니다', null,
+  ]) {
+    let calls = 0;
+    const runner: AsideRunner = async <T>() => {
+      calls++;
+      return (calls === 1
+        ? { products: [], candidates: [{ name: product.name, sourceUrl: product.sourceUrl, originalUrl: 'https://sharelink.toss.im/home', sectionName: '', price: product.price }] }
+        : invalid) as T;
+    };
+    await assert.rejects(new BrowserAutomation(runner).scanProducts(() => assert.fail('Invalid or mismatched output must not be saved')), /상품|수집/);
+    assert.equal(calls, 2);
+  }
+});
+
+test('direct-detail products are validated before callbacks and observer mutation cannot alter collected products', async () => {
+  const verified = { ...product, shareUrl: '' };
+  const validRunner: AsideRunner = async <T>() => ({ products: [verified], candidates: [] }) as T;
+  const result = await new BrowserAutomation(validRunner).scanProducts(item => { item.name = '콜백이 변경한 이름'; });
+  assert.deepEqual(result, { products: [verified], skipped: [] });
+  for (const invalid of [{ ...verified, price: '14,900원 15,900원' }, { ...verified, id: '999' }]) {
+    const runner: AsideRunner = async <T>() => ({ products: [invalid], candidates: [] }) as T;
+    await assert.rejects(new BrowserAutomation(runner).scanProducts(() => assert.fail('Invalid detail output cannot be saved')), /유효한 상품 목록/);
+  }
 });
 
 test('generated issuance scripts accept the actual Toss Shopping clipboard format', async () => {
@@ -279,8 +426,12 @@ test('generated issuance scripts accept the actual Toss Shopping clipboard forma
 
 test('invalid or oversized discovery plans stop before any product navigation', async () => {
   for (const candidates of [
-    Array.from({ length: 21 }, () => ({ name: '상품', sourceUrl: '', originalUrl: 'https://sharelink.toss.im/home' })),
-    [{ name: '상품', sourceUrl: '', originalUrl: 'https://evil.test/' }],
+    Array.from({ length: 21 }, () => ({ name: '상품', sourceUrl: '', originalUrl: 'https://sharelink.toss.im/home', sectionName: '', price: product.price })),
+    [{ name: '상품', sourceUrl: '', originalUrl: 'https://evil.test/', sectionName: '', price: product.price }],
+    [{ name: product.name, sourceUrl: '', originalUrl: 'https://sharelink.toss.im/home', price: product.price }],
+    [{ name: product.name, sourceUrl: '', originalUrl: 'https://sharelink.toss.im/home', sectionName: ' 영역 ', price: product.price }],
+    [{ name: product.name, sourceUrl: '', originalUrl: 'https://sharelink.toss.im/home', sectionName: '가'.repeat(201), price: product.price }],
+    [{ name: product.name, sourceUrl: '', originalUrl: 'https://sharelink.toss.im/home', sectionName: '', price: '14,900원 15,900원' }],
     [null],
   ]) {
     let calls = 0;
@@ -358,12 +509,22 @@ test('runner output URLs are revalidated and malformed input does not invoke Asi
 });
 
 test('operation-specific generated scripts fit the CLI budget and contain no private browser or profile APIs', () => {
-  const scripts = [buildOpenScript('toss'), buildOpenScript('naver'), buildScanPlanScript(), buildScanScript({ name: product.name, sourceUrl: '', originalUrl: 'https://sharelink.toss.im/home' }), buildProductScript(product, false), buildProductScript(product, true)];
+  const scripts = [buildOpenScript('toss'), buildOpenScript('naver'), buildScanPlanScript(), buildScanScript({ name: product.name, sourceUrl: '', originalUrl: 'https://sharelink.toss.im/home', sectionName: '', price: product.price }), buildProductScript(product, false), buildProductScript(product, true)];
   for (const script of scripts) {
     assert.ok(Buffer.byteLength(wrapAsideScript(script, '__BUDGET__'), 'utf8') < 24000);
     assert.doesNotMatch(script, /grantPermissions|clearPermissions|launchPersistentContext|\.context\(|closeTab\(|document\.body|body\.innerText|\bimport\s|\brequire\(/);
     assert.ok(!script.includes('console.log'));
   }
+});
+
+test('collection script fits CLI byte limit with maximum Korean candidate name and section', () => {
+  const sourceUrl = `https://sharelink.toss.im/links/products/${'1'.repeat(30)}`;
+  const code = buildScanScript({
+    name: '가'.repeat(500), sourceUrl, originalUrl: 'https://sharelink.toss.im/links/best-ranking',
+    sectionName: '나'.repeat(200), price: '1000원',
+  }, true);
+  assert.ok(Buffer.byteLength(wrapAsideScript(code, `__AUTO_FLOW_${'0'.repeat(32)}__:`), 'utf8') <= 24000);
+  assert.doesNotMatch(code, /async function checkedProduct/);
 });
 
 test('Naver results require the exact approved blog and a numeric post ID', () => {

@@ -9,8 +9,9 @@ const runner: AsideRunner = async <T>(script: string): Promise<T> => {
 };
 const browser = new BrowserAutomation(runner);
 const started = Date.now();
-void browser.scanProducts().then(async products => {
+void browser.scanProducts().then(async ({ products, skipped }) => {
   console.log('LIVE_SCAN_OK', JSON.stringify({ count: products.length, soldOut: products.filter(p => p.soldOut).length, elapsedMs: Date.now() - started,
+    skippedCount: skipped.length,
     samples: products.slice(0, 3).map(p => ({ id: p.id, name: p.name, price: p.price, soldOut: p.soldOut })) }));
   if (process.argv.includes('--verify')) {
     const available = products.find(p => !p.soldOut);

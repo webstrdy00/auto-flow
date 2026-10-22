@@ -25,7 +25,14 @@ export function smokeServices() {
   };
   const workflow = new AsideWorkflow(runner, async <T>(sessionId: string) => ({ status: 'complete' as const, value: receipts.get(sessionId) as T }));
   const browser: ProductBrowser = {
-    open: async () => {}, scanProducts: async () => [], verifyProduct: async () => {}, issueLink: async p => p.shareUrl,
+    open: async () => {},
+    scanProducts: async onProduct => {
+      const product = { id: '123456', name: '로컬 검증 상품', sourceUrl: 'https://sharelink.toss.im/links/products/123456',
+        price: '1000원', soldOut: false, checkedAt: new Date().toISOString(), facts: '', shareUrl: '' };
+      onProduct?.(product);
+      return { products: [product], skipped: [{ name: '목록에서 사라진 검증 상품', reason: 'missing' }] };
+    },
+    verifyProduct: async () => {}, issueLink: async p => p.shareUrl,
   };
   return { workflow, browserFor: () => browser, publicationCalls: () => publicationCalls };
 }
@@ -48,6 +55,10 @@ export async function runSmoke(window: BrowserWindow): Promise<void> {
     const now = new Date().toISOString();
     await api.execute({type:'saveSettings',naverBlogId:'autoflow_test',threadsHandle:'autoflow_test',tone:'확인된 사실만 다양한 도입으로 소개',useWorkTabs:true});
     await api.execute({type:'saveProduct',product:{id:'123456',name:'로컬 검증 상품',sourceUrl:'https://sharelink.toss.im/links/products/123456',price:'1000원',soldOut:false,checkedAt:now,facts:'',shareUrl:'https://toss.shopping/_m/SmokeOnly'}});
+    const scanState=await api.execute({type:'scanProducts'});
+    if(scanState.scan?.status!=='complete'||scanState.scan.saved!==1||scanState.scan.skipped.length!==1)throw new Error('Partial scan receipt missing');
+    if(scanState.products[0].shareUrl!=='https://toss.shopping/_m/SmokeOnly')throw new Error('Scan lost issued link');
+    if(!scanState.events.some(e=>e.message.includes('상품 수집 완료 · 저장 1개')))throw new Error('Collection event was not persisted');
     let state = await api.execute({type:'generate',productId:'123456'});
     if(state.drafts.length!==2) throw new Error('App generation did not save both channels');
     let draft=state.drafts.find(d=>d.channel==='naver');
@@ -78,6 +89,7 @@ export async function runSmoke(window: BrowserWindow): Promise<void> {
   const ui = await window.webContents.executeJavaScript(`(async () => {
     const wait=async condition=>{const deadline=Date.now()+5000;while(!condition()){if(Date.now()>deadline)throw new Error('Renderer state not visible');await new Promise(r=>setTimeout(r,20));}};
     await wait(()=>Array.from(document.querySelectorAll('input')).some(i=>i.value==='로컬 검증 상품'));
+    if(!document.body.textContent.includes('목록에서 사라진 검증 상품'))throw new Error('Skipped-product summary not rendered');
     const generationButton=Array.from(document.querySelectorAll('button')).find(b=>b.textContent.includes('채널별 원고 생성'));
     if(!generationButton||generationButton.disabled)throw new Error('Optional empty notes blocked generation');
     const panels=['상품','원고 검토','게시 작업','설정'];

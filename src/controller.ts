@@ -1,17 +1,21 @@
 import { randomUUID } from 'node:crypto';
 import { Store } from './store.js';
 import { BrowserAutomation } from './adapters/browser.js';
-import { AsideWorkflow, type Workflow, type PublishInput } from './adapters/aside-workflow.js';
+import { AsideWorkflow, PublicationBlockedError, type Workflow, type PublishInput } from './adapters/aside-workflow.js';
 import { parseCommand, validateResultUrl } from './validation.js';
-import type { AppState, Job, Product } from './shared.js';
+import type { AppState, Job, Product, ScanSummary } from './shared.js';
 
 export type ProductBrowser = Pick<BrowserAutomation, 'open' | 'scanProducts' | 'issueLink' | 'verifyProduct'>;
 export class AppController {
   private busy = false;
+  private scan: ScanSummary | undefined;
   constructor(private readonly store: Store, private readonly workflow: Workflow = new AsideWorkflow(),
     private readonly browserFor: (workTabs: boolean) => ProductBrowser = flag => new BrowserAutomation(undefined, flag),
     private readonly openExternal: (url: string) => Promise<unknown> = async () => { throw new Error('외부 링크 열기가 연결되지 않았습니다.'); }) {}
 
+  private state(): AppState {
+    return { ...this.store.state(), ...(this.scan ? { scan: structuredClone(this.scan) } : {}) };
+  }
   private product(id: string): Product {
     const product = this.store.state().products.find(p => p.id === id);
     if (!product) throw new Error('상품을 찾을 수 없습니다.');
@@ -31,22 +35,27 @@ export class AppController {
       this.workflow.assertPublishable(input);
       await this.browserFor(input.useWorkTabs).verifyProduct(input.product);
       if (this.store.state().paused) throw new Error('일시 정지되어 게시하지 않았습니다.');
-    } catch {
-      this.store.finish(id, 'needs_attention', '게시 전 상품·원고 검증이 중단되었습니다. 다시 확인하세요.');
+    } catch (error) {
+      const sleeping = error instanceof Error && /절전|언로드|로딩 중/.test(error.message);
+      this.store.finish(id, 'needs_attention', sleeping
+        ? 'Aside에서 대상 탭을 직접 클릭하고 로딩 완료 후 상품과 원고를 다시 확인해 승인하세요. 탭을 자동으로 깨우지 않습니다.'
+        : '게시 전 상품·원고 검증이 중단되었습니다. 다시 확인하세요.');
       return;
     }
     try {
       const result = await this.workflow.publish(this.publication(job));
       this.store.finish(id, 'published', result.previewStatus === 'visible' ? '공개 글과 링크 미리보기를 확인했습니다.' : '공개 글을 확인했습니다. 사이트에서 링크 미리보기가 표시되지 않았습니다.', result.url);
-    } catch {
-      this.store.finish(id, 'uncertain', 'Aside 작업이 계속 실행 중일 수 있습니다. 결과 확인 없이 다시 게시하지 마세요.');
+    } catch (error) {
+      this.store.finish(id, 'uncertain', error instanceof PublicationBlockedError
+        ? error.message
+        : 'Aside 작업이 계속 실행 중일 수 있습니다. 결과 확인 없이 다시 게시하지 마세요.');
     }
   }
 
   async execute(input: unknown): Promise<AppState> {
     const command = parseCommand(input);
-    if (command.type === 'state') return this.store.state();
-    if (command.type === 'pause') { this.store.setPaused(command.paused); return this.store.state(); }
+    if (command.type === 'state') return this.state();
+    if (command.type === 'pause') { this.store.setPaused(command.paused); return this.state(); }
     if (this.busy) throw new Error('진행 중인 작업이 있습니다. 완료 후 다시 시도하세요.');
     this.busy = true;
     try {
@@ -54,12 +63,34 @@ export class AppController {
       const browser = this.browserFor(state.settings.useWorkTabs);
       switch (command.type) {
         case 'openBrowser': await browser.open(command.channel); break;
-        case 'scanProducts':
-          for (const product of await browser.scanProducts()) {
+        case 'scanProducts': {
+          this.scan = { status: 'running', saved: 0, skipped: [], message: '확인한 상품부터 저장하고 있습니다.' };
+          const saved = new Set<string>();
+          const save = (product: Product) => {
             const existing = this.store.state().products.find(p => p.id === product.id);
             this.store.saveProduct(existing ? { ...product, shareUrl: existing.shareUrl, facts: existing.facts } : product);
+            saved.add(product.id);
+            this.scan!.saved = saved.size;
+          };
+          try {
+            const result = await browser.scanProducts(save);
+            for (const product of result.products) if (!saved.has(product.id)) save(product);
+            this.scan = { status: 'complete', saved: saved.size, skipped: result.skipped,
+              message: result.skipped.length ? '목록에서 사라진 상품은 건너뛰었습니다. 확인한 상품만 저장했습니다.' : '확인한 상품 수집을 완료했습니다.' };
+            this.store.recordScanResult(saved.size, result.skipped.length);
+          } catch (error) {
+            this.scan = { ...this.scan, status: 'failed',
+              message: '수집이 중단됐습니다. 이미 확인한 상품은 보존했습니다. 오류 원인을 확인한 뒤 다시 시도하세요.' };
+            const message = error instanceof Error ? error.message : '';
+            const failure = /절전|언로드|로딩 중/.test(message) ? 'sleeping'
+              : /상품명|상품 ID|상품명이|상품 카드|상품을 추측/.test(message) ? 'identity'
+              : /가격/.test(message) ? 'price'
+              : /로그인|권한|시간 초과|timeout|permission/i.test(message) ? 'connection' : 'other';
+            this.store.recordScanResult(saved.size, 0, failure);
+            throw error;
           }
           break;
+        }
         case 'saveProduct': this.store.saveProduct(command.product); break;
         case 'issueLink': {
           const product = this.product(command.productId);
@@ -115,7 +146,7 @@ export class AppController {
           break;
         }
       }
-      return this.store.state();
+      return this.state();
     } finally { this.busy = false; }
   }
 

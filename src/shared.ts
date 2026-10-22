@@ -39,7 +39,13 @@ export interface Settings {
   useWorkTabs: boolean;
 }
 export interface EventEntry { id: number; jobId: string; message: string; at: string }
-export interface AppState { products: Product[]; drafts: Draft[]; jobs: Job[]; settings: Settings; events: EventEntry[]; paused: boolean }
+export interface ScanSummary {
+  status: 'running' | 'complete' | 'failed';
+  saved: number;
+  skipped: Array<{ name: string; reason: 'missing' }>;
+  message: string;
+}
+export interface AppState { products: Product[]; drafts: Draft[]; jobs: Job[]; settings: Settings; events: EventEntry[]; paused: boolean; scan?: ScanSummary }
 export type Command =
   | { type: 'state' }
   | { type: 'openBrowser'; channel: 'toss' | 'naver' }

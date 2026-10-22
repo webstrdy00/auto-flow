@@ -92,6 +92,18 @@ function ProductCheck({ product }: { product: Product }) {
   return <Badge kind="success">판매 확인됨</Badge>;
 }
 
+function ProductScanStatus({ scan }: { scan: AppState['scan'] }) {
+  if (!scan) return null;
+  const title = scan.status === 'running' ? '상품 수집 중'
+    : scan.status === 'failed' ? '상품 수집 중단'
+      : scan.skipped.length ? '상품 수집 완료 · 일부 건너뜀' : '상품 수집 완료';
+  return <section className="aside-task-info" role="status" aria-live="polite" aria-atomic="true" aria-label="상품 수집 상태">
+    <strong>{title} · 확인·저장 {scan.saved}개</strong>
+    {scan.skipped.length > 0 && <p>목록에서 찾지 못해 건너뛴 상품 {scan.skipped.length}개: {scan.skipped.map((product) => product.name).join(' · ')}</p>}
+    {scan.status === 'failed' && <p>{scan.message}</p>}
+  </section>;
+}
+
 function EmptyState({ title, children, action }: { title: string; children: ReactNode; action?: ReactNode }) {
   return <div className="empty-state"><span className="empty-mark" aria-hidden="true">AF</span><h3>{title}</h3><p>{children}</p>{action && <div className="button-row">{action}</div>}</div>;
 }
@@ -209,8 +221,21 @@ export default function App() {
           : '';
         const message = command.type === 'runJob' || command.type === 'approve' || command.type === 'checkJob'
           ? `${commandName[command.type]} 응답을 확인하지 못했습니다. 원격 Aside 작업은 계속될 수 있습니다. 게시를 반복하지 말고 상태와 Aside 결과, 실제 게시물을 먼저 확인하세요.`
-          : `${commandName[command.type]}을(를) 완료하지 못했습니다. 입력값과 연결 상태를 확인하세요. 저장된 원고와 작업 상태는 새로고침으로 확인할 수 있습니다.`;
+          : command.type === 'scanProducts'
+            ? '상품 가져오기를 완료하지 못했습니다. 중단 전에 확인·저장한 상품은 유지됩니다. 수집 결과와 연결 상태를 확인하세요.'
+            : `${commandName[command.type]}을(를) 완료하지 못했습니다. 입력값과 연결 상태를 확인하세요. 저장된 원고와 작업 상태는 새로고침으로 확인할 수 있습니다.`;
         setError(`${message}${detail ? ` ${detail}` : ''}`);
+      }
+      if (command.type === 'scanProducts') {
+        const revision = ++commandRevision.current;
+        try {
+          const next = await window.autoFlow.execute({ type: 'state' });
+          if (mounted.current && revision === commandRevision.current) {
+            setApp(next); setLastSynced(new Date().toISOString());
+          }
+        } catch {
+          if (mounted.current) setError((current) => `${current} 저장된 상품과 수집 결과를 불러오지 못했습니다. 상태를 새로고침하세요.`);
+        }
       }
       return null;
     } finally {
@@ -436,12 +461,17 @@ export default function App() {
         {error && <div className="alert alert-error" role="alert"><div><strong>작업을 확인해 주세요</strong><p>{error}</p></div><button type="button" className="text-button" onClick={() => setError('')} aria-label="오류 메시지 닫기">닫기</button></div>}
         {notice && <div className="alert alert-success" role="status"><p>{notice}</p><button type="button" className="text-button" onClick={() => setNotice('')} aria-label="안내 메시지 닫기">닫기</button></div>}
         {app?.paused && <div className="alert alert-warning"><p><strong>새 게시 시작이 일시정지되어 있습니다.</strong> 예약 게시도 새로 시작하지 않습니다. 이미 실행 중인 게시 작업은 완료될 수 있습니다.</p></div>}
-        {panel !== 'jobs' && app?.jobs.some((job) => job.status === 'running' || job.status === 'uncertain') && <div className="alert alert-warning"><p>진행 중이거나 결과 확인이 필요한 Aside 게시 작업이 있습니다. 앱을 닫아도 원격 작업은 계속될 수 있으니 재게시하지 말고 세션 결과를 확인하세요.</p><button type="button" className="text-button" onClick={() => setPanel('jobs')}>게시 작업 확인</button></div>}
+        {panel !== 'jobs' && app?.jobs.some((job) => job.status === 'running' || job.status === 'uncertain') && <div className="alert alert-warning"><p>
+          {app.jobs.some((job) => job.status === 'running') ? '앱에서 실행 중인 게시 작업이 있습니다. 앱을 닫아도 원격 작업은 계속될 수 있습니다. ' : '이전 게시 결과를 확인해야 하는 작업이 있습니다. 현재 실행 중이라는 뜻은 아닙니다. '}
+          상품 수집 오류와는 별개이며 상품 가져오기를 차단하지 않습니다. 해당 글을 재게시하기 전에 게시 작업에서 결과를 확인하세요.
+        </p><button type="button" className="text-button" onClick={() => setPanel('jobs')}>게시 작업 확인</button></div>}
         {app && panel === 'drafts' && <div className="info-note"><strong>이 화면은 원고 검토이며 실제 서비스 미리보기를 재현하지 않습니다.</strong> 광고 고지와 원본 링크를 확인하고, 대상 서비스가 제공하는 기본 링크 미리보기도 확인하세요. 미리보기와 이미지 표시 여부는 보장하지 않으며 직접 이미지 업로드는 지원하지 않습니다.</div>}
         {!app ? <section className="card"><EmptyState title={pending ? '로컬 워크스페이스에 연결 중입니다' : '워크스페이스를 불러오지 못했습니다'} action={<button type="button" className="button primary" disabled={busy} onClick={() => { void execute({ type: 'state' }); }}>다시 연결</button>}>실제 저장된 상품, 원고와 작업만 표시합니다. Auto Flow 데스크톱 앱 연결이 필요합니다.</EmptyState></section> : <>
           {panel === 'products' && <>
             <div className="workflow-strip"><div><span className="step-number">01</span><span><strong>상품 확인</strong><small>토스에서 상태 확인</small></span></div><span className="step-line" /><div><span className="step-number">02</span><span><strong>원고 검토</strong><small>고지·링크·사실 검토</small></span></div><span className="step-line" /><div><span className="step-number">03</span><span><strong>게시 승인</strong><small>대상과 시각 확인</small></span></div></div>
-            <div className="action-bar"><div><strong>Aside 상품 가져오기</strong><p>Aside 로그인과 토스 상품 화면을 확인하세요. 작업 탭 사용 방식은 설정에서 정합니다.</p><button type="button" className="text-button" onClick={() => setPanel('settings')}>처음 사용: 설정과 사용 순서</button></div><div className="button-row"><button type="button" className="button secondary" disabled={busy} onClick={() => { void execute({ type: 'openBrowser', channel: 'toss' }); }}>토스 탭 연결</button><button type="button" className="button primary" disabled={busy} onClick={() => { void execute({ type: 'scanProducts' }).then((next) => { if (next) setNotice('상품 확인 요청을 처리했습니다. 각 상품의 확인 시각과 판매 상태를 검토하세요.'); }); }}>Aside 상품 가져오기</button></div></div>
+            <div className="action-bar"><div><strong>Aside 상품 가져오기</strong><p>Aside 로그인과 토스 상품 화면을 확인하세요. 절전·언로드된 탭은 직접 클릭해 화면을 표시해야 하며 자동으로 깨우지 않습니다. 작업 탭 사용 방식은 설정에서 정합니다.</p><button type="button" className="text-button" onClick={() => setPanel('settings')}>처음 사용: 설정과 사용 순서</button></div><div className="button-row"><button type="button" className="button secondary" disabled={busy} onClick={() => { void execute({ type: 'openBrowser', channel: 'toss' }); }}>토스 탭 연결</button><button type="button" className="button primary" disabled={busy} onClick={() => { void execute({ type: 'scanProducts' }); }}>Aside 상품 가져오기</button></div></div>
+            <ProductScanStatus scan={app.scan} />
+            <div className="info-note"><strong>목록에서 한 상품을 찾지 못해도 앞서 실제 확인·저장한 상품은 유지됩니다.</strong> 로그인 만료·보안 경고·상품 식별 모호성은 수집을 중단합니다. 각 상품의 확인 시각과 판매 상태를 검토하세요.</div>
             <div className="master-detail">
               <section className="card master-card" aria-label="상품 목록"><div className="card-heading"><h2>상품 목록 <span>{app.products.length}</span></h2></div><div className="search-field"><label className="sr-only" htmlFor="product-search">상품 검색</label><input id="product-search" type="search" placeholder="상품명으로 검색" value={productSearch} onChange={(event) => setProductSearch(event.target.value)} /></div><div className="selection-list">{app.products.filter((product) => product.name.toLocaleLowerCase().includes(productSearch.toLocaleLowerCase())).map((product) => <button type="button" key={product.id} className={`selection-item ${selectedProductId === product.id ? 'selected' : ''}`} aria-pressed={selectedProductId === product.id} disabled={editingLocked} onClick={() => selectProduct(product)}><div className="list-item-top"><span className="product-monogram" aria-hidden="true">{product.name.slice(0, 1) || 'P'}</span><ProductCheck product={product} /></div><strong>{product.name}</strong><span className="list-secondary">{product.price || '가격 미입력'}</span><span className="list-meta">확인 {dateText(product.checkedAt)}</span></button>)}{!app.products.length && <div className="list-empty">등록된 상품이 없습니다.<br />상품을 확인하거나 직접 추가하세요.</div>}{app.products.length > 0 && !app.products.some((product) => product.name.toLocaleLowerCase().includes(productSearch.toLocaleLowerCase())) && <div className="list-empty">검색 결과가 없습니다.</div>}</div></section>
               <section className="card detail-card" aria-label="상품 편집">{productForm ? <>
@@ -504,8 +534,8 @@ export default function App() {
                 <label className="field full">Threads @handle<input value={settingsForm.threadsHandle} onChange={(event) => changeSettings({ threadsHandle: event.target.value })} placeholder="예: @my_handle" autoComplete="off" spellCheck={false} /><small>threads.com/@ 뒤의 공개 사용자명을 입력하세요. Aside에 로그인된 실제 게시 계정과 같아야 합니다.</small></label>
               </div></section>
               <section className="card"><div className="card-heading"><div><span className="eyebrow">WRITING PREFERENCES</span><h2>원고 생성 설정</h2></div></div><div className="form-grid">
-                <label className="field full">문체와 작성 지침<textarea required rows={4} value={settingsForm.tone} onChange={(event) => changeSettings({ tone: event.target.value })} placeholder="예: 담백한 정보형. 구성·가격, 계산 단가, 사용 상황으로 도입을 바꿔 작성." /><small>확인되지 않은 사용 후기·효능·최저가, 거짓 마감·품절 임박 문구를 넣지 마세요. 가격은 확인 시점을 기준으로 안내합니다.</small></label>
-                <div className="copy-examples full"><h3>같은 틀을 반복하지 않는 구성 예</h3><ul><li><strong>구성·가격형:</strong> 확인한 용량·수량과 표시 가격부터 소개합니다.</li><li><strong>단가 비교형:</strong> 확인한 가격과 수량으로 단가를 계산하고, 같은 기준의 확인된 값만 비교합니다.</li><li><strong>사용 상황형:</strong> 보관 공간이나 필요한 수량을 고르는 상황을 제안합니다. 직접 써 본 경험처럼 표현하지 않습니다.</li></ul></div>
+                <label className="field full">문체와 작성 지침<textarea required rows={4} value={settingsForm.tone} onChange={(event) => changeSettings({ tone: event.target.value })} placeholder="예: 친근한 해요체로 짧게 소개해요. 구성과 가격은 쉽게, 단가 계산은 필요할 때 한 번만." /><small>블로그는 짧은 문단으로, Threads는 핵심부터 간결하게 작성합니다. 확인되지 않은 사용 후기·효능·최저가, 거짓 마감·품절 임박 문구는 넣지 않습니다. 변경은 이후 생성 원고에 적용되며 기존 원고나 게시물을 자동 수정하지 않습니다.</small></label>
+                <div className="copy-examples full"><h3>설명문보다 자연스러운 상품 소개</h3><ul><li><strong>구성·가격:</strong> “제공된 가격은”보다 “4개 묶음이고, 지금 확인한 가격은 …원이에요”처럼 쉽게 설명해요.</li><li><strong>단가:</strong> 도움이 될 때 “한 개에 …원꼴이에요” 정도만 덧붙여요. 여러 단위를 계산해서 나열하지 않아요.</li><li><strong>도입과 마무리:</strong> 상품에 맞는 생활 상황을 짧게 건네고, 링크 확인을 가볍게 안내해요. 직접 써 본 경험은 만들지 않아요.</li></ul></div>
               </div></section>
               <section className="card"><div className="card-heading"><div><span className="eyebrow">ASIDE WORK TABS</span><h2>작업 탭</h2></div></div><div className="form-grid"><div className="field full"><label className="checkbox-field" htmlFor="use-work-tabs"><input id="use-work-tabs" type="checkbox" checked={settingsForm.useWorkTabs} onChange={(event) => changeSettings({ useWorkTabs: event.target.checked })} aria-describedby="work-tabs-description" />새 작업 탭 사용</label><p id="work-tabs-description">이 설정을 켜고 저장한 경우에만 Aside의 기존 로그인을 사용하는 새 작업 탭을 만듭니다. 절전·언로드된 사용자 탭을 강제로 깨우거나 권한을 바꾸지 않고 작업할 수 있습니다.</p><small>끄면 기존 탭을 사용합니다. 필요한 탭을 직접 열어 화면이 표시되게 하세요. 여러 대상 탭이 있으면 Aside에서 사용할 탭을 직접 선택해야 합니다. 쿠키·프로필은 복사하지 않으며 접근 제한은 우회하지 않습니다.</small></div></div></section>
               <div className="settings-save"><span className="muted">설정을 바꾼 뒤에는 기존 작업의 게시 대상도 확인하세요.</span><button type="submit" className="button primary" disabled={busy || !settingsDirty}>설정 저장</button></div>

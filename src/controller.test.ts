@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { Store } from './store.js';
 import { AppController } from './controller.js';
 import { smokeServices } from './smoke.js';
+import { PublicationBlockedError } from './adapters/aside-workflow.js';
 
 async function setup(t: {after(fn:()=>void):void}) {
   const store=new Store(':memory:');t.after(()=>store.close());
@@ -54,4 +55,95 @@ test('app rejects obsolete secret settings and a changed target cannot execute a
   await app.execute({type:'saveSettings',naverBlogId:'changed',threadsHandle:'changed',tone:'test',useWorkTabs:true});
   await assert.rejects(app.execute({type:'runJob',jobId:id}));
   assert.equal(services.publicationCalls(),0);
+});
+
+test('scan persists verified progress before a fatal error and preserves operator facts and link', async t => {
+  const { store, services } = await setup(t);
+  const original = store.state().products[0]!;
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  let progressed!: () => void;
+  const ready = new Promise<void>(resolve => { progressed = resolve; });
+  const app = new AppController(store, services.workflow, () => ({
+    ...services.browserFor(),
+    scanProducts: async onProduct => {
+      onProduct?.({ ...original, price: '4,600원', facts: '', shareUrl: '' });
+      progressed();
+      await pending;
+      throw new Error('로그인이 필요합니다.');
+    },
+  }));
+  const operation = app.execute({ type: 'scanProducts' });
+  const rejected = assert.rejects(operation, /로그인/);
+  await ready;
+  const progress = await app.execute({ type: 'state' });
+  assert.equal(progress.scan?.status, 'running');
+  assert.equal(progress.scan?.saved, 1);
+  assert.equal(progress.products[0]!.price, '4,600원');
+  assert.equal(progress.products[0]!.shareUrl, original.shareUrl);
+  assert.equal(progress.products[0]!.facts, original.facts);
+  release();
+  await rejected;
+  const failed = await app.execute({ type: 'state' });
+  assert.equal(failed.scan?.status, 'failed');
+  assert.equal(failed.scan?.saved, 1);
+  assert.equal(failed.products[0]!.price, '4,600원');
+  assert.match(failed.events[0]!.message, /상품 수집 오류 · 저장 1개/);
+  assert.match(failed.events[0]!.message, /로그인·권한 또는 연결/);
+});
+
+test('scan reports missing candidates and does not claim they were collected', async t => {
+  const { store, services } = await setup(t);
+  const product = store.state().products[0]!;
+  const app = new AppController(store, services.workflow, () => ({
+    ...services.browserFor(),
+    scanProducts: async onProduct => {
+      onProduct?.(product);
+      return { products: [product], skipped: [{ name: '사라진 상품', reason: 'missing' as const }] };
+    },
+  }));
+  const state = await app.execute({ type: 'scanProducts' });
+  assert.equal(state.scan?.status, 'complete');
+  assert.equal(state.scan?.saved, 1);
+  assert.deepEqual(state.scan?.skipped, [{ name: '사라진 상품', reason: 'missing' }]);
+  assert.match(state.scan!.message, /건너뛰/);
+  assert.match(state.events[0]!.message, /저장 1개 · 목록에서 사라져 건너뛴 상품 1개/);
+});
+
+test('scan error history records safe categories instead of raw private error text', async t => {
+  const { store, services } = await setup(t);
+  const app = new AppController(store, services.workflow, () => ({
+    ...services.browserFor(),
+    scanProducts: async () => { throw new Error('같은 상품명의 수집 대상이 여러 개입니다. SECRET https://private.invalid/?token=hidden'); },
+  }));
+  await assert.rejects(app.execute({ type: 'scanProducts' }));
+  const state = await app.execute({ type: 'state' });
+  assert.match(state.events[0]!.message, /상품 수집 오류 · 저장 0개/);
+  assert.match(state.events[0]!.message, /상품명 또는 ID/);
+  assert.doesNotMatch(JSON.stringify(state.events), /SECRET|private.invalid|token=hidden/);
+});
+
+test('verified blocked reports expose a reason but never enable automatic reposting', async t => {
+  const { app, store, services } = await setup(t);
+  const state = await app.execute({ type: 'generate', productId: '123' });
+  const approved = await app.execute({ type: 'approve', draftId: state.drafts[0]!.id, scheduledAt: null });
+  const job = approved.jobs.find(j => j.status === 'approved')!;
+  let starts = 0;
+  const blocked = new AppController(store, {
+    generate: services.workflow.generate.bind(services.workflow),
+    assertPublishable: services.workflow.assertPublishable.bind(services.workflow),
+    publish: async input => {
+      starts++;
+      input.onSession('blocked-session');
+      throw new PublicationBlockedError('플랫폼에서 대상 계정 확인을 요구했습니다.');
+    },
+    recover: async () => { throw new PublicationBlockedError('플랫폼에서 대상 계정 확인을 요구했습니다.'); },
+  }, services.browserFor);
+  const result = await blocked.execute({ type: 'runJob', jobId: job.id });
+  const actual = result.jobs.find(j => j.id === job.id)!;
+  assert.equal(actual.status, 'uncertain');
+  assert.match(actual.message, /대상 계정 확인/);
+  await assert.rejects(blocked.execute({ type: 'checkJob', jobId: job.id }), /대상 계정 확인/);
+  await assert.rejects(blocked.execute({ type: 'runJob', jobId: job.id }));
+  assert.equal(starts, 1);
 });

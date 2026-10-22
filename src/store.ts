@@ -175,7 +175,7 @@ export class Store {
           id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL, message TEXT NOT NULL, at TEXT NOT NULL
         ) STRICT;
       `);
-      this.db.prepare('INSERT OR IGNORE INTO browser_preferences VALUES (1, ?, ?, ?, 1, 0)').run('', '', '한국어로 상품마다 도입·문장·구성을 다양하게 작성합니다. 확인한 구성과 가격만 사실대로 소개하고 직접 사용한 듯한 후기나 검증하지 않은 효능은 만들지 않습니다. 구매 전 확인사항은 짧게 덧붙입니다.');
+      this.db.prepare('INSERT OR IGNORE INTO browser_preferences VALUES (1, ?, ?, ?, 1, 0)').run('', '', '친근하고 자연스러운 해요체로 소개해요. 짧은 문단에 상품 구성과 가격을 쉽게 전달하고, 도입과 마무리는 상품마다 다양하게 써요. 단가 계산은 늘어놓지 않고 필요한 확인사항만 짧게 덧붙여요. 직접 써 본 듯한 후기·검증되지 않은 효능·거짓 긴급성은 만들지 않아요.');
       this.atomic(() => {
         const jobs = this.db.prepare(`SELECT ${JOB_COLUMNS} FROM browser_jobs WHERE status = 'running' OR (status = 'approved' AND scheduled_at IS NOT NULL AND scheduled_at <= ?)`).all(new Date().toISOString()) as unknown as Job[];
         for (const job of jobs) {
@@ -238,6 +238,21 @@ export class Store {
 
   private event(jobId: string, message: string): void {
     this.db.prepare('INSERT INTO events (job_id, message, at) VALUES (?, ?, ?)').run(jobId, message, new Date().toISOString());
+  }
+
+  recordScanResult(saved: number, skipped: number, failure?: 'identity' | 'price' | 'sleeping' | 'connection' | 'other'): void {
+    if (![saved, skipped].every(value => Number.isSafeInteger(value) && value >= 0)) throw new Error('수집 기록의 건수가 올바르지 않습니다.');
+    const reasons = {
+      identity: '상품명 또는 ID를 명확하게 식별하지 못했습니다.',
+      price: '현재 판매 가격을 명확하게 확인하지 못했습니다.',
+      sleeping: '대상 탭을 직접 깨우고 로딩 완료 후 다시 시도하세요.',
+      connection: '로그인·권한 또는 연결 상태를 확인하세요.',
+      other: '수집 화면 또는 연결 오류가 발생했습니다.',
+    };
+    if (failure !== undefined && !Object.hasOwn(reasons, failure)) throw new Error('수집 기록의 오류 유형이 올바르지 않습니다.');
+    this.event('', failure
+      ? `상품 수집 오류 · 저장 ${saved}개 · ${reasons[failure]} 이전에 확인한 상품은 보존했습니다.`
+      : `상품 수집 완료 · 저장 ${saved}개 · 목록에서 사라져 건너뛴 상품 ${skipped}개`);
   }
 
   private transition(id: string, status: JobStatus, message: string, url: string, event: string): void {

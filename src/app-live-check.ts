@@ -16,7 +16,7 @@ export async function runAppLiveCheck(window: BrowserWindow, inputFile: string):
     const state=await window.autoFlow.execute({type:'state'});
     if(state.products.length||state.jobs.length)throw new Error('Live check must use isolated app data');
     await window.autoFlow.execute(${JSON.stringify({ type: 'saveSettings', naverBlogId: input.account, threadsHandle: input.account,
-      tone: '짧고 다양한 도입으로 구성·가격과 사용 상황을 설명한다. 확인사항은 필요한 것만 간결하게 쓰고, 허위 경험·효능·최저가·긴급성을 만들지 않는다.', useWorkTabs: true })});
+      tone: '친근한 해요체와 짧은 문단으로 자연스럽게 소개해요. 구성과 가격을 쉽게 전달하고 단가나 주의사항을 길게 나열하지 않아요. 허위 경험·효능·최저가·긴급성은 만들지 않아요.', useWorkTabs: true })});
     await window.autoFlow.execute(${JSON.stringify({ type: 'saveProduct', product })});
   })()`);
   await reloadRenderer(window);
