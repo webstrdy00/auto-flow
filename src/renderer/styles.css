@@ -97,6 +97,7 @@ main:focus { outline: none; }
 .badge-naver { background: #edf7f2; color: #34795c; border-color: #deeee5; }
 .badge-threads { background: #f2f2f5; color: #4e5362; border-color: #e6e6ec; }
 .badge-approved, .badge-running { background: #edf3ff; color: #416db1; border-color: #dbe7fc; }
+.badge-awaiting_publication { background: #f0edfc; color: #66509a; border-color: #e0d8f3; white-space: normal; text-align: left; }
 .badge-cancelled { color: #8791a1; }
 .alert { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; border-radius: 8px; padding: 14px 17px; margin-bottom: 18px; border: 1px solid; font-size: 12px; }
 .alert strong { display: block; font-weight: 650; margin-bottom: 2px; }
@@ -185,7 +186,7 @@ input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--accent);
 .approval-footer > p { font-size: 10px; color: #7889a3; }
 .schedule-note { font-size: 10px; color: #8795a8; margin-top: 16px; line-height: 1.85; }
 
-.metrics-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 17px; }
+.metrics-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 17px; }
 .metric { padding: 23px 24px; }
 .metric > span { font-size: 11px; font-weight: 550; color: #6a7a93; }
 .metric > strong { display: block; font-size: 31px; font-weight: 650; color: #334d76; letter-spacing: -.04em; margin-top: 13px; }
@@ -203,6 +204,7 @@ input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--accent);
 .job-list { display: flex; flex-direction: column; gap: 14px; }
 .job-card { padding: 22px 24px 17px; }
 .job-card.job-uncertain { border-color: #e9d8b3; }
+.job-card.job-awaiting { border-color: #d8cfed; }
 .job-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; }
 .job-title { min-width: 0; }
 .job-title h3 { margin: 10px 0 17px; font-size: 14px; overflow-wrap: anywhere; }
@@ -226,6 +228,13 @@ input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--accent);
 .reconcile-form > p { color: #a58d68; font-size: 10px; margin: 7px 0 15px; }
 .reconcile-form .field { margin-bottom: 12px; }
 .reconcile-form .button { font-size: 10px; }
+.manual-publication { padding: 18px; margin-top: 17px; border: 1px solid #ded7ef; border-radius: 7px; background: #f8f6fd; }
+.manual-publication h3 { color: #615084; font-size: 12px; }
+.manual-publication ol { margin: 13px 0; padding-left: 21px; color: #6b6380; font-size: 11px; line-height: 1.9; }
+.manual-publication li + li { margin-top: 9px; }
+.manual-publication > p { color: #786b91; font-size: 10px; }
+.manual-publication form { margin-top: 16px; }
+.manual-publication .field { margin-bottom: 12px; }
 .events-card { margin-top: 27px; }
 .events-card .card-heading { padding: 20px 24px; }
 .events-card .card-heading h2 { font-size: 14px; }
@@ -274,6 +283,10 @@ input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--accent);
 .confirm-details > div { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 14px; font-size: 11px; line-height: 1.8; }
 .confirm-details dt { color: #8a98ad; }
 .confirm-details dd { color: #465d80; font-weight: 550; overflow-wrap: anywhere; }
+.confirmation-checks { margin-bottom: 20px; padding: 14px; border: 1px solid #ecdebd; border-radius: 7px; background: #fffbf1; }
+.confirmation-checks legend { font-size: 11px; font-weight: 600; color: #89662c; }
+.confirmation-checks .checkbox-field { align-items: flex-start; min-height: 0; padding: 7px 0; line-height: 1.8; }
+.confirmation-checks input { margin-top: 3px; }
 .dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; padding-top: 3px; }
 
 @media (min-width: 1550px) {
@@ -327,7 +340,7 @@ input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--accent);
   .workflow-strip strong { font-size: 10px; }
   .step-number { width: 25px; height: 25px; font-size: 9px; }
   .page-heading > .button { font-size: 11px; }
-  .metrics-grid { gap: 10px; }
+  .metrics-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .metric { padding: 18px 15px; }
   .metric > p { font-size: 9px; }
   .section-toolbar { flex-wrap: wrap; }
@@ -392,7 +405,7 @@ input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--accent);
   .job-details > div { gap: 10px; }
   .job-actions { flex-wrap: wrap; }
   .job-actions > .button-row:last-child { margin-left: auto; }
-  .segmented-control { width: 100%; }
+  .segmented-control { width: 100%; flex-wrap: wrap; }
   .segmented-control button { flex: 1; padding: 8px 6px; font-size: 10px; }
   .events-card .card-heading { padding: 18px; }
   .event-list { padding: 4px 18px; }

@@ -1,5 +1,5 @@
 export type Channel = 'naver' | 'threads';
-export type JobStatus = 'draft' | 'approved' | 'running' | 'published' | 'needs_attention' | 'uncertain' | 'cancelled';
+export type JobStatus = 'draft' | 'approved' | 'running' | 'published' | 'needs_attention' | 'uncertain' | 'cancelled' | 'awaiting_publication';
 export interface Product {
   id: string;
   name: string;
@@ -24,6 +24,7 @@ export interface Job {
   draftId: string;
   version: number;
   channel: Channel;
+  operation: 'publish' | 'threads_draft';
   target: string;
   scheduledAt: string | null;
   status: JobStatus;
@@ -55,6 +56,9 @@ export type Command =
   | { type: 'generate'; productId: string }
   | { type: 'saveDraft'; draft: Draft }
   | { type: 'approve'; draftId: string; scheduledAt: string | null }
+  | { type: 'approveThreadsDraft'; draftId: string }
+  | { type: 'completeThreadsPublication'; jobId: string; resultUrl: string }
+  | { type: 'confirmDraftNotSaved'; jobId: string; remoteStopped: true; noSavedDraft: true; noPublicPost: true }
   | { type: 'runJob'; jobId: string }
   | { type: 'checkJob'; jobId: string }
   | { type: 'cancelJob'; jobId: string }

@@ -72,3 +72,16 @@ test('product IPC accepts observed affiliate URLs but rejects lookalikes and hid
     assert.throws(() => parseCommand({ type: 'saveProduct', product: { ...product, shareUrl } }));
   }
 });
+
+test('Threads draft commands exclude schedules and require three literal acknowledgments', () => {
+  assert.deepEqual(parseCommand({ type: 'approveThreadsDraft', draftId: 'draft-1' }), { type: 'approveThreadsDraft', draftId: 'draft-1' });
+  assert.throws(() => parseCommand({ type: 'approveThreadsDraft', draftId: 'draft-1', scheduledAt: null }));
+  const complete = { type: 'completeThreadsPublication', jobId: 'job-1', resultUrl: 'https://threads.com/@person/post/abc' };
+  assert.deepEqual(parseCommand(complete), complete);
+  const acknowledgment = { type: 'confirmDraftNotSaved', jobId: 'job-1', remoteStopped: true, noSavedDraft: true, noPublicPost: true };
+  assert.deepEqual(parseCommand(acknowledgment), acknowledgment);
+  for (const key of ['remoteStopped', 'noSavedDraft', 'noPublicPost']) {
+    for (const value of [undefined, false, 1, 'true', null]) assert.throws(() => parseCommand({ ...acknowledgment, [key]: value }));
+  }
+  assert.throws(() => parseCommand({ ...acknowledgment, asideSessionId: 'untrusted' }));
+});

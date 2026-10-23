@@ -33,7 +33,7 @@ async function start() {
   ipcMain.handle('auto-flow:execute', async (event, input: unknown) => {
     if (quitting || !window || window.isDestroyed() || event.sender.isDestroyed()) throw new Error('앱이 종료 중입니다.');
     if (event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame || event.senderFrame?.url !== rendererUrl) throw new Error('허용되지 않은 요청입니다.');
-    if (liveCheck && input && typeof input === 'object' && 'type' in input && ['approve', 'runJob', 'issueLink', 'checkJob', 'reconcile'].includes(String(input.type))) {
+    if (liveCheck && input && typeof input === 'object' && 'type' in input && ['approve', 'approveThreadsDraft', 'runJob', 'issueLink', 'checkJob', 'reconcile', 'completeThreadsPublication', 'confirmDraftNotSaved'].includes(String(input.type))) {
       throw new Error('실제 생성 검증 모드에서는 발급·승인·게시를 실행할 수 없습니다.');
     }
     try { return await controller.execute(input); }

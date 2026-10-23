@@ -20,23 +20,26 @@ type Confirmation = {
   action: () => Promise<void>;
   publication?: boolean;
   jobId?: string;
+  requiredChecks?: string[];
 };
 
 const panelInfo: Record<Panel, { label: string; description: string }> = {
   products: { label: '상품', description: '판매 상태를 확인하고, 사실에 기반한 원고를 준비하세요.' },
-  drafts: { label: '원고 검토', description: '문구, 광고 고지, 게시 계정을 확인한 뒤 승인하세요.' },
-  jobs: { label: '게시 작업', description: '승인된 작업과 예약, 실제 게시 결과를 한곳에서 확인하세요.' },
+  drafts: { label: '원고 검토', description: '네이버 게시 또는 Threads 웹 임시저장을 구분해 승인하세요.' },
+  jobs: { label: '게시 작업', description: '네이버 자동 게시와 Threads 웹 임시저장·수동 게시 결과를 확인하세요.' },
   settings: { label: '설정', description: '공개 게시 계정과 글쓰기 지침, Aside 작업 방식을 관리하세요.' },
 };
 const channelName: Record<Channel, string> = { naver: '네이버 블로그', threads: 'Threads' };
 const jobStatusName: Record<JobStatus, string> = {
-  draft: '승인 대기', approved: '승인됨', running: '게시 중', published: '게시 완료',
+  draft: '승인 대기', approved: '승인됨', running: '실행 중', published: '게시 완료',
+  awaiting_publication: '웹 임시저장 확인 · 수동 게시 대기',
   needs_attention: '확인 필요', uncertain: '결과 불확실', cancelled: '취소됨',
 };
 const commandName: Record<Command['type'], string> = {
   state: '상태 확인', openBrowser: 'Aside 탭 연결', scanProducts: 'Aside 상품 가져오기',
   saveProduct: '상품 저장', issueLink: '쉐어링크 발급', generate: '원고 생성',
-  saveDraft: '원고 저장', approve: '게시 승인', runJob: '게시 실행', cancelJob: '작업 취소',
+  saveDraft: '원고 저장', approve: '네이버 게시 승인', approveThreadsDraft: 'Threads 임시저장 승인', runJob: '승인 작업 실행', cancelJob: '작업 취소',
+  completeThreadsPublication: 'Threads 공개 게시 확인', confirmDraftNotSaved: '웹 임시저장·공개 게시 없음 확인',
   checkJob: 'Aside 결과 확인', reconcile: '게시 결과 연결', confirmNotPublished: '미게시 확인', pause: '일시정지 변경', saveSettings: '설정 저장', openResult: '게시물 열기',
 };
 
@@ -113,7 +116,9 @@ function AsideTaskInfo({ job }: { job: Job }) {
     <strong>Aside 작업 · {jobStatusName[job.status]}</strong>
     <p>세션: <span className="session-id">{job.asideSessionId || '기록 대기 중'}</span></p>
     {job.message && <p>{job.message.slice(0, 350)}</p>}
-    <p>앱을 닫거나 응답이 끊겨도 원격 작업은 계속될 수 있습니다. 결과와 실제 게시물을 확인하기 전에는 다시 게시하지 마세요.</p>
+    <p>{job.operation === 'threads_draft'
+      ? '앱을 닫거나 응답이 끊겨도 원격 임시저장 작업은 계속될 수 있습니다. 같은 세션의 결과와 웹 저장 목록을 먼저 확인하고, 임시저장을 반복하지 마세요. 이 작업은 공개 게시를 하지 않습니다.'
+      : '앱을 닫거나 응답이 끊겨도 원격 작업은 계속될 수 있습니다. 결과와 실제 게시물을 확인하기 전에는 다시 게시하지 마세요.'}</p>
   </div>;
 }
 
@@ -121,6 +126,8 @@ function ConfirmDialog({ confirmation, pending, job, onClose, onError }: {
   confirmation: Confirmation; pending: boolean; job?: Job; onClose: () => void; onError: () => void;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
+  const [checked, setChecked] = useState<Record<number, boolean>>({});
+  const checksComplete = confirmation.requiredChecks?.every((_, index) => checked[index]) ?? true;
   useEffect(() => {
     const dialog = ref.current;
     dialog?.showModal();
@@ -133,8 +140,10 @@ function ConfirmDialog({ confirmation, pending, job, onClose, onError }: {
     <div className="dialog-heading"><span className="eyebrow">{confirmation.publication ? 'PUBLICATION CONFIRMATION' : 'CONFIRMATION'}</span><h2 id="confirm-title">{confirmation.title}</h2></div>
     <p id="confirm-description">{confirmation.description}</p>
     <dl className="confirm-details">{confirmation.details.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
+    {confirmation.requiredChecks && <fieldset className="confirmation-checks" disabled={pending}><legend>각 항목을 직접 확인한 경우에만 체크하세요.</legend>{confirmation.requiredChecks.map((label, index) => <label className="checkbox-field" key={label}><input type="checkbox" checked={Boolean(checked[index])} onChange={(event) => setChecked((current) => ({ ...current, [index]: event.target.checked }))} />{label}</label>)}</fieldset>}
     {pending && job && <AsideTaskInfo job={job} />}
-    <div className="dialog-actions"><button type="button" className="button secondary" autoFocus disabled={pending} onClick={onClose}>돌아가기</button><button type="button" className="button primary" disabled={pending} onClick={() => {
+    <div className="dialog-actions"><button type="button" className="button secondary" autoFocus disabled={pending} onClick={onClose}>돌아가기</button><button type="button" className="button primary" disabled={pending || !checksComplete} onClick={() => {
+      if (!checksComplete) return;
       void confirmation.action().then(onClose).catch(onError);
     }}>{pending ? '처리 중…' : confirmation.label}</button></div>
   </dialog>;
@@ -196,7 +205,7 @@ export default function App() {
   const execute = useCallback(async (command: Command): Promise<AppState | null> => {
     if (command.type === 'state') return refreshState();
     if (commandLock.current) {
-      setError('다른 작업을 처리 중입니다. 완료된 뒤 상태를 확인하세요. 게시 요청은 반복하지 마세요.');
+      setError('다른 작업을 처리 중입니다. 완료된 뒤 상태를 확인하세요. 게시·임시저장 요청은 반복하지 마세요.');
       return null;
     }
     commandLock.current = true;
@@ -219,8 +228,10 @@ export default function App() {
         const detail = cause instanceof Error
           ? cause.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '').slice(0, 350)
           : '';
-        const message = command.type === 'runJob' || command.type === 'approve' || command.type === 'checkJob'
-          ? `${commandName[command.type]} 응답을 확인하지 못했습니다. 원격 Aside 작업은 계속될 수 있습니다. 게시를 반복하지 말고 상태와 Aside 결과, 실제 게시물을 먼저 확인하세요.`
+        const message = command.type === 'runJob' || command.type === 'approve' || command.type === 'approveThreadsDraft' || command.type === 'checkJob'
+          ? `${commandName[command.type]} 응답을 확인하지 못했습니다. 원격 Aside 작업은 계속될 수 있습니다. 게시·임시저장을 반복하지 말고 상태와 같은 Aside 세션 결과, 웹 저장 목록·실제 게시물을 먼저 확인하세요.`
+          : command.type === 'completeThreadsPublication'
+            ? 'Threads 공개 게시를 확인하지 못했습니다. 이 동작은 읽기 전용이며 새 글을 게시하지 않습니다. 입력한 공개 URL과 원고·계정·링크를 확인하세요. 수동 게시를 반복하지 마세요.'
           : command.type === 'scanProducts'
             ? '상품 가져오기를 완료하지 못했습니다. 중단 전에 확인·저장한 상품은 유지됩니다. 수집 결과와 연결 상태를 확인하세요.'
             : `${commandName[command.type]}을(를) 완료하지 못했습니다. 입력값과 연결 상태를 확인하세요. 저장된 원고와 작업 상태는 새로고침으로 확인할 수 있습니다.`;
@@ -358,18 +369,38 @@ export default function App() {
   const draftTarget = draftForm ? (draftForm.channel === 'naver' ? app?.settings.naverBlogId : app?.settings.threadsHandle) ?? '' : '';
   const hasDisclosure = draftForm?.body.includes(DISCLOSURE) ?? false;
   const hasShareLink = Boolean(productForDraft?.shareUrl && draftForm?.body.includes(productForDraft.shareUrl));
-  const existingApproval = Boolean(draftForm && app?.jobs.some((job) => job.draftId === draftForm.id
-    && (['approved', 'running', 'uncertain'].includes(job.status) || (job.status === 'published' && job.version === draftForm.version))));
+  const existingApproval = Boolean(draftForm && app?.jobs.some((job) => {
+    const jobDraft = app?.drafts.find((draft) => draft.id === job.draftId);
+    if (job.channel === draftForm.channel && jobDraft?.productId === draftForm.productId
+      && ['running', 'uncertain', 'awaiting_publication'].includes(job.status)) return true;
+    return job.draftId === draftForm.id && ((job.status === 'approved' && !(job.channel === 'threads' && job.operation === 'publish'))
+      || (job.status === 'published' && job.version === draftForm.version));
+  }));
   const approvalBlocker = draftDirty ? '변경사항을 저장한 뒤 승인할 수 있습니다.'
-    : !draftTarget ? '설정에서 게시 대상 계정을 먼저 입력하세요.'
+    : !draftTarget ? '설정에서 대상 계정을 먼저 입력하세요.'
       : !productForDraft || !isFresh(productForDraft) ? '상품 탭에서 24시간 이내의 실제 판매 상태를 확인하세요.'
         : productForDraft.soldOut ? '품절 상품은 승인할 수 없습니다.'
           : !hasDisclosure || !hasShareLink ? '원고에 광고 고지와 저장된 쉐어링크를 모두 포함하세요.'
-            : existingApproval ? '이미 승인·진행 중이거나 게시된 버전입니다. 작업 상태를 확인하세요.'
+            : existingApproval ? '이미 승인·진행 중이거나 수동 게시 대기·게시 완료된 작업이 있습니다. 작업 상태를 확인하세요.'
               : app?.paused ? '일시정지를 해제한 뒤 승인하세요.' : '';
 
   const askApprove = () => {
     if (!draftForm || approvalBlocker) return;
+    const draft = draftForm;
+    if (draft.channel === 'threads') {
+      setConfirmation({
+        title: '새 비공개 Threads 웹 임시저장을 승인할까요?',
+        description: '이 승인은 아래 계정에 새 비공개 WEB 임시저장 글을 만드는 것만 허용합니다. 공개 게시나 예약 게시 승인이 아니며 기존 저장 글은 열거나 수정·삭제하지 않습니다. 웹 저장 확인 후 같은 계정의 모바일 앱에 동기화되었는지 직접 확인해야 합니다. 동기화는 아직 검증되지 않았으며 보장하지 않습니다. 필수 협찬 광고 레이블은 모바일에서 직접 적용하고 최종 게시하세요.',
+        details: [['채널', 'Threads WEB 임시저장'], ['대상 계정', draftTarget], ['원고', draft.title], ['검토 버전', `v${draft.version}`]],
+        label: 'Threads 임시저장 승인',
+        action: async () => {
+          if (await execute({ type: 'approveThreadsDraft', draftId: draft.id })) {
+            setSchedule(''); setPanel('jobs'); setNotice('Threads 웹 임시저장만 승인했습니다. 작업에서 웹 임시저장을 실행하세요. 앱은 Threads를 자동 공개 게시하지 않습니다.');
+          }
+        },
+      });
+      return;
+    }
     let scheduledAt: string | null = null;
     if (schedule) {
       const date = new Date(schedule);
@@ -378,7 +409,6 @@ export default function App() {
       }
       scheduledAt = date.toISOString();
     }
-    const draft = draftForm;
     setConfirmation({
       title: scheduledAt ? '이 계정에 예약 게시를 승인할까요?' : '이 원고의 게시 준비를 승인할까요?',
       description: scheduledAt
@@ -395,6 +425,20 @@ export default function App() {
 
   const askRun = (job: Job) => {
     const draft = app?.drafts.find((item) => item.id === job.draftId);
+    if (job.channel === 'threads' && job.operation === 'publish') {
+      setError('기존 Threads 공개 게시 승인은 실행할 수 없습니다. 원고를 다시 검토하고 Threads 임시저장을 새로 승인하세요.');
+      return;
+    }
+    if (job.operation === 'threads_draft') {
+      setConfirmation({
+        title: '새 비공개 Threads 웹 임시저장을 실행할까요?',
+        description: 'Aside가 아래 계정의 WEB 화면에서 새 비공개 임시저장 글 하나를 만들고 저장 목록에서 확인합니다. 공개 게시 버튼을 누르지 않으며 기존 저장 글은 보존합니다. 작업 중에는 대상 탭을 편집하지 마세요. 응답이 끊기면 같은 세션의 결과와 실제 웹 저장 목록을 먼저 확인하고 저장을 반복하지 마세요. 모바일 동기화는 이 실행으로 검증되지 않습니다.',
+        details: [['작업', 'Threads WEB 비공개 임시저장'], ['대상 계정', job.target], ['원고', draft?.title ?? '저장된 승인 원고'], ['승인 버전', `v${job.version}`]],
+        label: '웹 임시저장 실행', jobId: job.id,
+        action: async () => { if (await execute({ type: 'runJob', jobId: job.id })) setNotice('웹 임시저장 실행 응답을 받았습니다. 저장 확인 상태를 확인하고, 같은 계정의 모바일 동기화 여부는 직접 확인하세요. 공개 게시를 요청하지 않았습니다.'); },
+      });
+      return;
+    }
     setConfirmation({
       title: '지금 실제로 게시할까요?',
       description: 'Aside가 연결된 계정에 아래 원고를 실제 게시합니다. 작업 중에는 대상 탭에서 직접 이동하거나 편집하지 마세요. 앱을 닫아도 원격 작업은 계속될 수 있습니다. 응답이 불확실하면 세션 결과와 실제 게시물을 먼저 확인하고, 중복 게시하지 마세요.',
@@ -404,8 +448,8 @@ export default function App() {
     });
   };
   const askCancel = (job: Job) => setConfirmation({
-    title: '이 게시 작업을 취소할까요?',
-    description: '아직 실행되지 않은 이 작업을 취소합니다. 이미 게시된 글을 삭제하는 기능이 아닙니다.',
+    title: '이 작업을 취소할까요?',
+    description: '아직 실행되지 않았거나 재검토가 필요한 앱 작업만 취소합니다. 웹 임시저장 글이나 이미 게시된 글을 삭제하지 않습니다. 저장 확인·수동 게시 대기 작업은 이 앱에서 취소하거나 원격 글을 삭제할 수 없습니다.',
     details: [['채널', channelName[job.channel]], ['게시 대상', job.target], ['현재 상태', jobStatusName[job.status]]], label: '작업 취소',
     action: async () => { if (await execute({ type: 'cancelJob', jobId: job.id })) setNotice('작업을 취소했습니다.'); },
   });
@@ -418,6 +462,34 @@ export default function App() {
       if (await execute({ type: 'confirmNotPublished', jobId: job.id })) setNotice('미게시 확인을 처리했습니다. 다시 게시하려면 원고를 재검토하고 승인하세요. 이 동작으로 게시되지는 않습니다.');
     },
   });
+  const askConfirmDraftNotSaved = (job: Job) => setConfirmation({
+    title: '원격 작업 종료와 임시저장·공개 게시 없음을 모두 확인했나요?',
+    description: '같은 Aside 저장 세션의 작업이 끝난 뒤 대상 계정의 WEB 저장 목록과 공개 게시물을 직접 확인하세요. 앱에 결과가 없거나 모바일에서 보이지 않는 것만으로 저장 실패를 판단할 수 없습니다. 기존의 다른 임시저장 글은 그대로 두세요. 이 확인은 앱 작업만 취소하며 원격 글을 삭제하지 않습니다. 하나라도 확실하지 않다면 돌아가서 결과를 확인하세요.',
+    details: [['작업', 'Threads WEB 임시저장'], ['직접 확인할 계정', job.target], ['승인 버전', `v${job.version}`], ['같은 저장 세션', job.asideSessionId || '세션 기록 없음 · 원격 종료를 별도로 확인해야 함']],
+    requiredChecks: ['해당 Aside 원격 저장 작업이 종료되었음을 직접 확인했습니다.', '같은 계정의 WEB 저장 목록에 이 원고와 일치하는 임시저장 글이 없음을 직접 확인했습니다.', '같은 계정에 이 원고와 일치하는 공개 게시물이 없음을 직접 확인했습니다.'],
+    label: '세 항목 확인 · 앱 작업만 취소',
+    action: async () => {
+      if (await execute({ type: 'confirmDraftNotSaved', jobId: job.id, remoteStopped: true, noSavedDraft: true, noPublicPost: true })) {
+        setNotice('원격 종료·일치하는 웹 임시저장 없음·공개 게시 없음 확인을 기록했습니다. 원격 글은 삭제하지 않았습니다. 다시 저장하려면 원고를 검토하고 새로 승인하세요.');
+      }
+    },
+  });
+  const askCompleteThreadsPublication = (job: Job, event: FormEvent) => {
+    event.preventDefault();
+    const resultUrl = resultInputs[job.id]?.trim() ?? '';
+    if (!safeUrl(resultUrl)) { setError('모바일에서 직접 게시한 Threads 글의 실제 공개 URL을 입력하세요.'); return; }
+    setConfirmation({
+      title: '직접 게시한 Threads 공개 글을 확인할까요?',
+      description: '같은 계정의 모바일 앱에서 원고와 필수 협찬 광고 레이블을 직접 확인·적용하고 최종 게시한 글의 공개 URL이어야 합니다. Aside가 이 URL을 읽기 전용으로 열어 승인 원고의 본문·계정·원본 링크가 일치하는지 검증한 뒤에만 게시 완료로 기록합니다. 이 동작은 새 글 게시, 임시저장 삭제 또는 모바일 자동화를 하지 않습니다.',
+      details: [['게시 계정', job.target], ['승인 버전', `v${job.version}`], ['직접 게시한 공개 URL', resultUrl]],
+      label: '공개 글 읽기 전용 확인',
+      action: async () => {
+        if (await execute({ type: 'completeThreadsPublication', jobId: job.id, resultUrl })) {
+          setResultInputs((current) => ({ ...current, [job.id]: '' })); setNotice('Threads 공개 글 검증 응답을 받았습니다. 본문·계정·링크 검증 후의 작업 상태를 확인하세요. 새 게시나 원격 글 삭제는 요청하지 않았습니다.');
+        }
+      },
+    });
+  };
   const askReconcile = (job: Job, event: FormEvent) => {
     event.preventDefault();
     const resultUrl = resultInputs[job.id]?.trim() ?? '';
@@ -436,10 +508,12 @@ export default function App() {
 
   const attentionCount = app?.jobs.filter((job) => job.status === 'needs_attention' || job.status === 'uncertain').length ?? 0;
   const approvedCount = app?.jobs.filter((job) => job.status === 'approved').length ?? 0;
+  const awaitingCount = app?.jobs.filter((job) => job.status === 'awaiting_publication').length ?? 0;
   const recentEvents = [...(app?.events ?? [])].sort((left, right) => right.id - left.id).slice(0, 8);
   const filteredJobs = app?.jobs.filter((job) => jobFilter === 'all'
     || (jobFilter === 'attention' && ['uncertain', 'needs_attention'].includes(job.status))
     || (jobFilter === 'active' && ['approved', 'running', 'draft'].includes(job.status))
+    || (jobFilter === 'awaiting' && job.status === 'awaiting_publication')
     || (jobFilter === 'done' && ['published', 'cancelled'].includes(job.status))) ?? [];
 
   return <div className="app-shell">
@@ -453,22 +527,22 @@ export default function App() {
 
     <div className="workspace">
       <header className="topbar"><div className="breadcrumb">워크스페이스 <span>/</span> <strong>{panelInfo[panel].label}</strong></div><div className="topbar-actions"><span className="sync-status" role="status">{pending ? `${commandName[pending]} 중…` : lastSynced ? `${dateText(lastSynced)} 동기화` : '연결 대기'}</span><button type="button" className="icon-button" title="상태 새로고침" aria-label="상태 새로고침" disabled={busy} onClick={() => { void execute({ type: 'state' }); }}><Icon name="refresh" /></button>{app && <button type="button" className={`button compact ${app.paused ? 'paused-button' : 'secondary'}`} aria-pressed={app.paused} disabled={busy} onClick={() => {
-        void execute({ type: 'pause', paused: !app.paused }).then((next) => { if (next) setNotice(next.paused ? '새 게시 시작을 일시정지했습니다. 이미 실행 중인 게시 작업은 계속될 수 있습니다.' : '일시정지를 해제했습니다. 승인된 예약은 예약 조건에 따라 실행됩니다.'); });
+        void execute({ type: 'pause', paused: !app.paused }).then((next) => { if (next) setNotice(next.paused ? '새 게시·임시저장 실행을 일시정지했습니다. 이미 실행 중인 원격 작업은 계속될 수 있습니다.' : '일시정지를 해제했습니다. 승인된 네이버 예약은 예약 조건에 따라 실행됩니다. Threads 공개 게시를 자동 실행하지 않습니다.'); });
       }}><Icon name="pause" />{app.paused ? '일시정지 해제' : '일시정지'}</button>}</div></header>
 
       <main id="main-content" tabIndex={-1}>
         <div className="page-heading"><div><span className="eyebrow">YOUR PUBLISHING DESK</span><h1>{panelInfo[panel].label}</h1><p>{panelInfo[panel].description}</p></div>{app && panel === 'products' && <button type="button" className="button primary" disabled={busy} onClick={newProduct}>상품 직접 추가 <span aria-hidden="true">+</span></button>}</div>
         {error && <div className="alert alert-error" role="alert"><div><strong>작업을 확인해 주세요</strong><p>{error}</p></div><button type="button" className="text-button" onClick={() => setError('')} aria-label="오류 메시지 닫기">닫기</button></div>}
         {notice && <div className="alert alert-success" role="status"><p>{notice}</p><button type="button" className="text-button" onClick={() => setNotice('')} aria-label="안내 메시지 닫기">닫기</button></div>}
-        {app?.paused && <div className="alert alert-warning"><p><strong>새 게시 시작이 일시정지되어 있습니다.</strong> 예약 게시도 새로 시작하지 않습니다. 이미 실행 중인 게시 작업은 완료될 수 있습니다.</p></div>}
+        {app?.paused && <div className="alert alert-warning"><p><strong>새 게시·임시저장 실행이 일시정지되어 있습니다.</strong> 네이버 예약 게시도 새로 시작하지 않습니다. 이미 실행 중인 원격 작업은 완료될 수 있습니다. 직접 모바일에서 게시하는 동작을 이 앱이 막지는 않습니다.</p></div>}
         {panel !== 'jobs' && app?.jobs.some((job) => job.status === 'running' || job.status === 'uncertain') && <div className="alert alert-warning"><p>
-          {app.jobs.some((job) => job.status === 'running') ? '앱에서 실행 중인 게시 작업이 있습니다. 앱을 닫아도 원격 작업은 계속될 수 있습니다. ' : '이전 게시 결과를 확인해야 하는 작업이 있습니다. 현재 실행 중이라는 뜻은 아닙니다. '}
-          상품 수집 오류와는 별개이며 상품 가져오기를 차단하지 않습니다. 해당 글을 재게시하기 전에 게시 작업에서 결과를 확인하세요.
+          {app.jobs.some((job) => job.status === 'running') ? '실행 중인 게시·웹 임시저장 작업이 있습니다. 앱을 닫아도 원격 작업은 계속될 수 있습니다. ' : '이전 게시·웹 임시저장 결과를 확인해야 하는 작업이 있습니다. 현재 실행 중이라는 뜻은 아닙니다. '}
+          상품 수집 오류와는 별개이며 상품 가져오기를 차단하지 않습니다. 게시·임시저장을 반복하기 전에 게시 작업에서 같은 세션의 결과를 확인하세요.
         </p><button type="button" className="text-button" onClick={() => setPanel('jobs')}>게시 작업 확인</button></div>}
         {app && panel === 'drafts' && <div className="info-note"><strong>이 화면은 원고 검토이며 실제 서비스 미리보기를 재현하지 않습니다.</strong> 광고 고지와 원본 링크를 확인하고, 대상 서비스가 제공하는 기본 링크 미리보기도 확인하세요. 미리보기와 이미지 표시 여부는 보장하지 않으며 직접 이미지 업로드는 지원하지 않습니다.</div>}
         {!app ? <section className="card"><EmptyState title={pending ? '로컬 워크스페이스에 연결 중입니다' : '워크스페이스를 불러오지 못했습니다'} action={<button type="button" className="button primary" disabled={busy} onClick={() => { void execute({ type: 'state' }); }}>다시 연결</button>}>실제 저장된 상품, 원고와 작업만 표시합니다. Auto Flow 데스크톱 앱 연결이 필요합니다.</EmptyState></section> : <>
           {panel === 'products' && <>
-            <div className="workflow-strip"><div><span className="step-number">01</span><span><strong>상품 확인</strong><small>토스에서 상태 확인</small></span></div><span className="step-line" /><div><span className="step-number">02</span><span><strong>원고 검토</strong><small>고지·링크·사실 검토</small></span></div><span className="step-line" /><div><span className="step-number">03</span><span><strong>게시 승인</strong><small>대상과 시각 확인</small></span></div></div>
+            <div className="workflow-strip"><div><span className="step-number">01</span><span><strong>상품 확인</strong><small>토스에서 상태 확인</small></span></div><span className="step-line" /><div><span className="step-number">02</span><span><strong>원고 검토</strong><small>고지·링크·사실 검토</small></span></div><span className="step-line" /><div><span className="step-number">03</span><span><strong>채널별 승인</strong><small>네이버 게시 · Threads 임시저장</small></span></div></div>
             <div className="action-bar"><div><strong>Aside 상품 가져오기</strong><p>Aside 로그인과 토스 상품 화면을 확인하세요. 절전·언로드된 탭은 직접 클릭해 화면을 표시해야 하며 자동으로 깨우지 않습니다. 작업 탭 사용 방식은 설정에서 정합니다.</p><button type="button" className="text-button" onClick={() => setPanel('settings')}>처음 사용: 설정과 사용 순서</button></div><div className="button-row"><button type="button" className="button secondary" disabled={busy} onClick={() => { void execute({ type: 'openBrowser', channel: 'toss' }); }}>토스 탭 연결</button><button type="button" className="button primary" disabled={busy} onClick={() => { void execute({ type: 'scanProducts' }); }}>Aside 상품 가져오기</button></div></div>
             <ProductScanStatus scan={app.scan} />
             <div className="info-note"><strong>목록에서 한 상품을 찾지 못해도 앞서 실제 확인·저장한 상품은 유지됩니다.</strong> 로그인 만료·보안 경고·상품 식별 모호성은 수집을 중단합니다. 각 상품의 확인 시각과 판매 상태를 검토하세요.</div>
@@ -489,27 +563,33 @@ export default function App() {
             </div><div className="info-note"><strong>본문과 링크를 게시하며, 서비스가 제공하는 기본 링크 미리보기는 유지합니다.</strong> 미리보기와 이미지 표시 여부는 서비스·링크에 따라 달라지며 보장하지 않습니다. 직접 이미지 업로드는 지원하지 않습니다. 향후 사용 권한을 검증하는 절차 없이는 이미지 수집·첨부를 하지 않습니다. 자동화 중에는 작업 탭을 편집하지 마세요. 접근 제한을 우회하거나 자동 재시도하지 않습니다.</div>
           </>}
 
-          {panel === 'drafts' && <div className="master-detail draft-layout"><section className="card master-card" aria-label="원고 목록"><div className="card-heading"><h2>작성된 원고 <span>{app.drafts.length}</span></h2></div><div className="selection-list">{app.drafts.map((draft) => <button type="button" key={draft.id} className={`selection-item ${selectedDraftId === draft.id ? 'selected' : ''}`} aria-pressed={selectedDraftId === draft.id} disabled={editingLocked} onClick={() => { selectDraft(draft); }}><div className="list-item-top"><Badge kind={draft.channel}>{channelName[draft.channel]}</Badge><span className="version-label">v{draft.version}</span></div><strong>{draft.title || '제목 없음'}</strong><span className="list-secondary">{app.products.find((product) => product.id === draft.productId)?.name ?? '연결 상품 확인 필요'}</span><span className="list-meta">수정 {dateText(draft.updatedAt)}</span></button>)}{!app.drafts.length && <div className="list-empty">생성된 원고가 없습니다.</div>}</div></section><section className="card detail-card" aria-label="원고 편집">{draftForm ? <><div className="card-heading"><div><span className="eyebrow">DRAFT EDITOR</span><h2>{channelName[draftForm.channel]} 원고</h2></div><Badge kind={draftDirty ? 'warning' : 'neutral'}>{draftDirty ? `수정 중 · 저장 시 v${draftForm.version + 1}` : `저장된 버전 v${draftForm.version}`}</Badge></div><form onSubmit={(event) => { void saveDraft(event); }}><fieldset disabled={editingLocked}><div className="form-grid"><label className="field full">제목<input required value={draftForm.title} onChange={(event) => changeDraft({ title: event.target.value })} /></label><label className="field full">본문<textarea className="draft-body" required rows={15} value={draftForm.body} onChange={(event) => changeDraft({ body: event.target.value })} /><small>{draftForm.body.length.toLocaleString('ko-KR')}자 · 텍스트 전용 · 수정된 원고는 새 버전으로 저장하고 다시 승인해야 합니다.</small></label></div><div className="form-footer"><span className="muted">최근 저장 {dateText(draftForm.updatedAt)}</span><button type="submit" className="button primary" disabled={busy || !draftDirty}>새 버전으로 저장</button></div></fieldset></form><div className="review-section"><div className="section-title"><h3>게시 전 검토</h3><span>버전 v{draftForm.version}</span></div><dl className="review-details"><div><dt>게시 대상</dt><dd><strong>{channelName[draftForm.channel]}</strong> · {draftTarget || '설정되지 않음'}</dd></div><div><dt>연결 상품</dt><dd>{productForDraft?.name ?? '상품을 찾을 수 없음'} {productForDraft && <ProductCheck product={productForDraft} />}</dd></div></dl><div className="disclosure-box"><div className="section-title"><strong>필수 광고 고지</strong><Badge kind={hasDisclosure ? 'success' : 'warning'}>{hasDisclosure ? '본문 포함' : '본문에 추가 필요'}</Badge></div><p>{DISCLOSURE}</p><div className="review-link"><span>검토할 쉐어링크</span>{productForDraft?.shareUrl && safeUrl(productForDraft.shareUrl) ? <a href={safeUrl(productForDraft.shareUrl) ?? undefined} target="_blank" rel="noopener noreferrer">{productForDraft.shareUrl}</a> : <strong>등록된 유효한 링크 없음</strong>}<Badge kind={hasShareLink ? 'success' : 'warning'}>{hasShareLink ? '본문 포함' : '본문 확인 필요'}</Badge></div></div><label className="field schedule-field" htmlFor="schedule">예약 시각 <span className="optional">선택 · 이 PC의 현지 시간</span><input id="schedule" type="datetime-local" value={schedule} disabled={editingLocked} onChange={(event) => setSchedule(event.target.value)} /><small>비워 두면 승인 후 작업 화면에서 직접 게시합니다. 예약하면 승인한 시각에 자동 게시됩니다.</small></label><div className="approval-footer"><p>{approvalBlocker || '사실, 광고 고지, 링크와 게시 대상을 직접 확인한 뒤 승인하세요.'}</p><button type="button" className="button primary" disabled={busy || Boolean(approvalBlocker)} onClick={askApprove}>{schedule ? '예약 게시 승인' : '게시 준비 승인'}</button></div><p className="schedule-note">예약 실행에는 켜진 PC와 실행 중인 앱이 필요합니다. 2분 넘게 놓친 예약은 수동 확인 후 재승인하세요. 일시정지는 새 실행만 막으며 진행 중인 게시를 되돌리지 않습니다.</p></div></> : <EmptyState title="검토할 원고를 만들어 보세요" action={<button type="button" className="button primary" onClick={() => setPanel('products')}>상품에서 원고 생성</button>}>확인된 상품명·가격과 쉐어링크로 채널별 원고를 생성하세요. 추가 메모는 선택이며 원고 생성만으로 게시되지는 않습니다.</EmptyState>}</section></div>}
+          {panel === 'drafts' && <div className="master-detail draft-layout"><section className="card master-card" aria-label="원고 목록"><div className="card-heading"><h2>작성된 원고 <span>{app.drafts.length}</span></h2></div><div className="selection-list">{app.drafts.map((draft) => <button type="button" key={draft.id} className={`selection-item ${selectedDraftId === draft.id ? 'selected' : ''}`} aria-pressed={selectedDraftId === draft.id} disabled={editingLocked} onClick={() => { selectDraft(draft); }}><div className="list-item-top"><Badge kind={draft.channel}>{channelName[draft.channel]}</Badge><span className="version-label">v{draft.version}</span></div><strong>{draft.title || '제목 없음'}</strong><span className="list-secondary">{app.products.find((product) => product.id === draft.productId)?.name ?? '연결 상품 확인 필요'}</span><span className="list-meta">수정 {dateText(draft.updatedAt)}</span></button>)}{!app.drafts.length && <div className="list-empty">생성된 원고가 없습니다.</div>}</div></section><section className="card detail-card" aria-label="원고 편집">{draftForm ? <><div className="card-heading"><div><span className="eyebrow">DRAFT EDITOR</span><h2>{channelName[draftForm.channel]} 원고</h2></div><Badge kind={draftDirty ? 'warning' : 'neutral'}>{draftDirty ? `수정 중 · 저장 시 v${draftForm.version + 1}` : `저장된 버전 v${draftForm.version}`}</Badge></div><form onSubmit={(event) => { void saveDraft(event); }}><fieldset disabled={editingLocked}><div className="form-grid"><label className="field full">제목<input required value={draftForm.title} onChange={(event) => changeDraft({ title: event.target.value })} /></label><label className="field full">본문<textarea className="draft-body" required rows={15} value={draftForm.body} onChange={(event) => changeDraft({ body: event.target.value })} /><small>{Array.from(draftForm.body).length.toLocaleString('ko-KR')}자 · 텍스트 전용 · 수정된 원고는 새 버전으로 저장하고 다시 승인해야 합니다.</small></label></div><div className="form-footer"><span className="muted">최근 저장 {dateText(draftForm.updatedAt)}</span><button type="submit" className="button primary" disabled={busy || !draftDirty}>새 버전으로 저장</button></div></fieldset></form><div className="review-section"><div className="section-title"><h3>{draftForm.channel === 'threads' ? '웹 임시저장 전 검토' : '게시 전 검토'}</h3><span>버전 v{draftForm.version}</span></div><dl className="review-details"><div><dt>대상 계정</dt><dd><strong>{channelName[draftForm.channel]}</strong> · {draftTarget || '설정되지 않음'}</dd></div><div><dt>연결 상품</dt><dd>{productForDraft?.name ?? '상품을 찾을 수 없음'} {productForDraft && <ProductCheck product={productForDraft} />}</dd></div></dl><div className="disclosure-box"><div className="section-title"><strong>필수 광고 고지</strong><Badge kind={hasDisclosure ? 'success' : 'warning'}>{hasDisclosure ? '본문 포함' : '본문에 추가 필요'}</Badge></div><p>{DISCLOSURE}</p><div className="review-link"><span>검토할 쉐어링크</span>{productForDraft?.shareUrl && safeUrl(productForDraft.shareUrl) ? <a href={safeUrl(productForDraft.shareUrl) ?? undefined} target="_blank" rel="noopener noreferrer">{productForDraft.shareUrl}</a> : <strong>등록된 유효한 링크 없음</strong>}<Badge kind={hasShareLink ? 'success' : 'warning'}>{hasShareLink ? '본문 포함' : '본문 확인 필요'}</Badge></div></div>
+            {draftForm.channel === 'threads' ? <div className="info-note"><strong>새 비공개 WEB 임시저장만 승인합니다.</strong> 기존 저장 글은 보존하며 공개·예약 게시하지 않습니다. 모바일 동기화는 미검증입니다. 웹 저장 확인 뒤 같은 계정의 모바일에서 직접 동기화를 확인하고, 본문 고지와 별개인 필수 협찬 광고 레이블을 적용해 최종 게시해야 합니다.</div> : <label className="field schedule-field" htmlFor="schedule">예약 시각 <span className="optional">선택 · 이 PC의 현지 시간</span><input id="schedule" type="datetime-local" value={schedule} disabled={editingLocked} onChange={(event) => setSchedule(event.target.value)} /><small>비워 두면 승인 후 작업 화면에서 직접 실행합니다. 네이버 예약은 승인한 시각에 Aside가 자동 게시합니다.</small></label>}
+            <div className="approval-footer"><p>{approvalBlocker || '사실, 광고 고지, 링크와 대상 계정을 직접 확인한 뒤 승인하세요.'}</p><button type="button" className="button primary" disabled={busy || Boolean(approvalBlocker)} onClick={askApprove}>{draftForm.channel === 'threads' ? 'Threads 임시저장 승인' : schedule ? '예약 게시 승인' : '게시 준비 승인'}</button></div><p className="schedule-note">{draftForm.channel === 'threads' ? '앱은 Threads 공개 게시나 모바일 조작을 자동 실행하지 않습니다. 원고 생성·앱 저장만으로는 WEB 임시저장도 되지 않습니다.' : '예약 실행에는 켜진 PC와 실행 중인 앱이 필요합니다. 2분 넘게 놓친 예약은 수동 확인 후 재승인하세요. 일시정지는 새 실행만 막으며 진행 중인 게시를 되돌리지 않습니다.'}</p></div></> : <EmptyState title="검토할 원고를 만들어 보세요" action={<button type="button" className="button primary" onClick={() => setPanel('products')}>상품에서 원고 생성</button>}>확인된 상품명·가격과 쉐어링크로 채널별 원고를 생성하세요. 추가 메모는 선택이며 원고 생성만으로 게시·WEB 임시저장되지는 않습니다.</EmptyState>}</section></div>}
 
           {panel === 'jobs' && <>
-            <div className="metrics-grid"><div className="metric card"><span>승인된 작업</span><strong>{approvedCount}<small>건</small></strong><p>계정과 예약 시각을 확인하세요</p></div><div className="metric card"><span>직접 확인 필요</span><strong className={attentionCount ? 'warning-text' : ''}>{attentionCount}<small>건</small></strong><p>불확실한 결과는 재게시하지 마세요</p></div><div className="metric card"><span>게시 완료</span><strong>{app.jobs.filter((job) => job.status === 'published').length}<small>건</small></strong><p>실제 게시물에서 최종 확인</p></div></div>
-            <div className="info-note"><strong>예약은 사전 승인한 게시에만 적용됩니다.</strong> PC, Auto Flow 앱과 Aside가 실행 중이고 필요한 대상 탭에 접근할 수 있어야 합니다. 2분 넘게 놓친 예약은 자동 게시하지 않으며, 원고를 다시 확인하고 재승인해야 합니다. 예약 없는 작업은 아래에서 직접 게시하세요.</div>
-            <section className="jobs-section"><div className="section-toolbar"><h2>게시 작업 <span className="count-text">{app.jobs.length}</span></h2><div className="segmented-control" aria-label="작업 필터">{[['all', '전체'], ['active', '진행 대기'], ['attention', '확인 필요'], ['done', '완료·취소']].map(([value, label]) => <button type="button" key={value} className={jobFilter === value ? 'selected' : ''} aria-pressed={jobFilter === value} onClick={() => setJobFilter(value)}>{label}</button>)}</div></div><div className="job-list">{filteredJobs.map((job) => {
+            <div className="metrics-grid"><div className="metric card"><span>승인된 작업</span><strong>{approvedCount}<small>건</small></strong><p>게시·임시저장 작업을 구분하세요</p></div><div className="metric card"><span>직접 확인 필요</span><strong className={attentionCount ? 'warning-text' : ''}>{attentionCount}<small>건</small></strong><p>불확실하면 같은 세션부터 확인</p></div><div className="metric card"><span>Threads 수동 게시 대기</span><strong>{awaitingCount}<small>건</small></strong><p>웹 저장 확인 · 아직 게시 완료 아님</p></div><div className="metric card"><span>게시 완료</span><strong>{app.jobs.filter((job) => job.status === 'published').length}<small>건</small></strong><p>실제 공개 글 확인 완료</p></div></div>
+            <div className="info-note"><strong>네이버는 승인 후 Aside가 게시하며, 예약 승인 시 자동 실행됩니다. Threads는 웹 임시저장까지만 실행합니다.</strong> Threads 모바일 동기화는 아직 검증되지 않았습니다. 같은 계정의 모바일에서 직접 확인하고 필수 협찬 광고 레이블을 적용해 최종 게시한 뒤 공개 URL을 검증하세요. 앱은 모바일 원클릭 게시를 제공하지 않습니다. 네이버 예약에는 실행 중인 PC·앱·Aside와 대상 탭 접근이 필요하며, 2분 넘게 놓친 예약은 재검토·재승인해야 합니다.</div>
+            <section className="jobs-section"><div className="section-toolbar"><h2>게시 작업 <span className="count-text">{app.jobs.length}</span></h2><div className="segmented-control" aria-label="작업 필터">{[['all', '전체'], ['active', '진행 대기'], ['awaiting', '수동 게시 대기'], ['attention', '확인 필요'], ['done', '완료·취소']].map(([value, label]) => <button type="button" key={value} className={jobFilter === value ? 'selected' : ''} aria-pressed={jobFilter === value} onClick={() => setJobFilter(value)}>{label}</button>)}</div></div><div className="job-list">{filteredJobs.map((job) => {
               const draft = app.drafts.find((item) => item.id === job.draftId);
+              const threadsDraft = job.operation === 'threads_draft';
+              const legacyThreadsPublish = job.channel === 'threads' && job.operation === 'publish';
               const scheduledTime = job.scheduledAt ? new Date(job.scheduledAt).getTime() : null;
               const future = scheduledTime !== null && scheduledTime > Date.now();
               const overdue = scheduledTime !== null && Date.now() - scheduledTime > 120000;
-              return <article key={job.id} className={`card job-card ${job.status === 'uncertain' ? 'job-uncertain' : ''}`}>
-                <div className="job-heading"><div className="job-title"><div className="button-row"><Badge kind={job.status}>{jobStatusName[job.status]}</Badge><span className="channel-text">{channelName[job.channel]}</span><span className="version-label">v{job.version}</span></div><h3>{draft?.title ?? '저장된 게시 작업'}</h3></div><span className="job-time">{dateText(job.updatedAt)}</span></div>
-                <dl className="job-details"><div><dt>게시 대상</dt><dd>{job.target || '대상 확인 필요'}</dd></div><div><dt>예약</dt><dd>{job.scheduledAt ? `${dateText(job.scheduledAt)} · 현지 시간` : '직접 게시'}{job.status === 'approved' && overdue && <span className="warning-text"> · 시각 경과, 재검토 필요</span>}</dd></div></dl>
+              return <article key={job.id} className={`card job-card ${job.status === 'uncertain' ? 'job-uncertain' : job.status === 'awaiting_publication' ? 'job-awaiting' : ''}`}>
+                <div className="job-heading"><div className="job-title"><div className="button-row"><Badge kind={job.status}>{threadsDraft && job.status === 'running' ? '웹 임시저장 중' : jobStatusName[job.status]}</Badge><span className="channel-text">{channelName[job.channel]} · {threadsDraft ? 'WEB 임시저장' : '공개 게시'}</span><span className="version-label">v{job.version}</span></div><h3>{draft?.title ?? '저장된 작업'}</h3></div><span className="job-time">{dateText(job.updatedAt)}</span></div>
+                <dl className="job-details"><div><dt>대상 계정</dt><dd>{job.target || '대상 확인 필요'}</dd></div><div><dt>{threadsDraft ? '실행 방식' : '예약'}</dt><dd>{threadsDraft ? '직접 WEB 임시저장 · 공개·예약 게시 없음' : job.scheduledAt ? `${dateText(job.scheduledAt)} · 현지 시간` : '직접 게시'}{!threadsDraft && job.status === 'approved' && overdue && <span className="warning-text"> · 시각 경과, 재검토 필요</span>}</dd></div></dl>
+                {legacyThreadsPublish && ['approved', 'draft', 'needs_attention'].includes(job.status) && <p className="job-message">기존 Threads 공개 게시 승인입니다. 임시저장 승인으로 전환되지 않으며 실행할 수 없습니다. 원고를 다시 검토하고 Threads 임시저장을 새로 승인하세요.</p>}
                 {job.status === 'running' || job.status === 'uncertain' ? <>
                   <AsideTaskInfo job={job} />
                   {job.status === 'uncertain' && job.asideSessionId && <div className="aside-recovery"><button type="button" className="button secondary" disabled={busy} onClick={() => {
-                    void execute({ type: 'checkJob', jobId: job.id }).then((next) => { if (next) setNotice('기존 Aside 세션의 결과를 조회했습니다. 작업 상태와 실제 게시물 URL을 확인하세요. 새 게시 요청은 하지 않았습니다.'); });
-                  }}>{pending === 'checkJob' ? 'Aside 결과 확인 중…' : 'Aside 결과 확인'}</button><p>저장된 세션을 읽기 전용으로 조회합니다. 게시 재실행이나 아래 수동 결과 연결과는 별개입니다.</p></div>}
+                    void execute({ type: 'checkJob', jobId: job.id }).then((next) => { if (next) setNotice(threadsDraft ? '같은 Aside 저장 세션의 결과를 조회했습니다. 웹 임시저장 확인 상태와 실제 저장 목록을 확인하세요. 저장·공개 게시를 다시 요청하지 않았습니다.' : '기존 Aside 세션의 결과를 조회했습니다. 작업 상태와 실제 게시물 URL을 확인하세요. 새 게시 요청은 하지 않았습니다.'); });
+                  }}>{pending === 'checkJob' ? 'Aside 결과 확인 중…' : threadsDraft ? '같은 저장 세션 결과 확인' : 'Aside 결과 확인'}</button><p>{threadsDraft ? '처음 실행한 같은 저장 세션을 읽기 전용으로 확인합니다. 새 저장·공개 게시를 실행하거나 기존 저장 글을 변경하지 않습니다.' : '저장된 세션을 읽기 전용으로 조회합니다. 게시 재실행이나 아래 수동 결과 연결과는 별개입니다.'}</p></div>}
                 </> : job.message && <p className="job-message">{job.message.slice(0, 600)}</p>}
-                {job.status === 'uncertain' && <div className="reconcile-form"><strong>원본 계정에서 실제 게시 여부를 먼저 확인하세요.</strong><p>이미 게시되었다면 해당 글의 정확한 주소를 입력하세요. 게시되지 않았음을 확실히 확인했다면 아래 미게시 확인을 진행하세요. 단순히 게시물을 찾지 못한 경우에는 재게시하지 마세요.</p><form onSubmit={(event) => askReconcile(job, event)}><label className="field" htmlFor={`result-${job.id}`}>직접 확인한 실제 게시물 URL<input id={`result-${job.id}`} type="url" required placeholder="https://…" disabled={editingLocked} value={resultInputs[job.id] ?? ''} onChange={(event) => setResultInputs((current) => ({ ...current, [job.id]: event.target.value }))} /></label><div className="button-row"><button type="submit" className="button secondary" disabled={busy || !resultInputs[job.id]?.trim()}>게시 결과 연결</button><button type="button" className="text-button" disabled={busy} onClick={() => askConfirmNotPublished(job)}>미게시 확인</button></div></form><p>미게시 확인은 작업 취소만 처리합니다. 다시 게시하려면 원고를 검토하고 재승인해야 합니다.</p></div>}
-                <div className="job-actions"><div className="button-row">{draft && <button type="button" className="button secondary compact" disabled={editingLocked} onClick={() => viewDraft(draft)}>원고 검토</button>}{['approved', 'draft', 'needs_attention'].includes(job.status) && <button type="button" className="text-button danger-text" disabled={busy} onClick={() => askCancel(job)}>작업 취소</button>}</div><div className="button-row">{job.resultUrl && <button type="button" className="button secondary compact" disabled={busy} onClick={() => { void execute({ type: 'openResult', jobId: job.id }); }}>실제 게시물 열기</button>}{job.status === 'approved' && <button type="button" className="button primary compact" disabled={busy || app.paused || future || overdue} onClick={() => askRun(job)}>{future ? '예약 시각에 자동 게시' : overdue ? '예약 재검토 필요' : '지금 게시 확인'}</button>}</div></div>
+                {job.status === 'uncertain' && (threadsDraft ? <div className="reconcile-form"><strong>같은 계정의 WEB 저장 목록과 원격 작업 종료를 먼저 확인하세요.</strong><p>모바일에서 보이지 않거나 앱에 결과가 없다는 이유로 다시 저장하지 마세요. 위의 같은 저장 세션 결과 확인을 먼저 사용하세요. 이 원고와 일치하는 저장 글이나 공개 글이 있거나 원격 작업이 계속된다면 아래 확인을 진행하면 안 됩니다. 기존의 다른 저장 글은 보존하세요.</p><button type="button" className="button secondary" disabled={busy} onClick={() => askConfirmDraftNotSaved(job)}>원격 종료·저장 없음·공개 게시 없음 확인</button><p>세 항목을 각각 직접 확인해야 앱 작업만 취소할 수 있습니다. 웹 저장 글을 앱에서 삭제하지 않습니다.</p></div> : <div className="reconcile-form"><strong>원본 계정에서 실제 게시 여부를 먼저 확인하세요.</strong><p>이미 게시되었다면 해당 글의 정확한 주소를 입력하세요. 게시되지 않았음을 확실히 확인했다면 아래 미게시 확인을 진행하세요. 단순히 게시물을 찾지 못한 경우에는 재게시하지 마세요.</p><form onSubmit={(event) => askReconcile(job, event)}><label className="field" htmlFor={`result-${job.id}`}>직접 확인한 실제 게시물 URL<input id={`result-${job.id}`} type="url" required placeholder="https://…" disabled={editingLocked} value={resultInputs[job.id] ?? ''} onChange={(event) => setResultInputs((current) => ({ ...current, [job.id]: event.target.value }))} /></label><div className="button-row"><button type="submit" className="button secondary" disabled={busy || !resultInputs[job.id]?.trim()}>게시 결과 연결</button><button type="button" className="text-button" disabled={busy} onClick={() => askConfirmNotPublished(job)}>미게시 확인</button></div></form><p>미게시 확인은 작업 취소만 처리합니다. 다시 게시하려면 원고를 검토하고 재승인해야 합니다.</p></div>)}
+                {threadsDraft && job.status === 'awaiting_publication' && <section className="manual-publication" aria-label="Threads 수동 게시 안내"><h3>WEB 임시저장 확인 · 최종 공개 게시 대기</h3><ol><li><strong>완료: WEB 저장 목록에서 원고 확인</strong> — 공개 게시 완료가 아닙니다.</li><li><strong>사용자 확인 필요: 같은 계정의 MOBILE 동기화</strong> — 아직 검증되지 않았으며 보장하지 않습니다. 원고와 계정을 직접 확인하세요.</li><li><strong>모바일에서 필수 협찬 광고 레이블 적용 후 직접 게시</strong> — 본문 광고 고지만으로 레이블을 대신하지 않습니다. 앱은 모바일을 조작하거나 원클릭 게시하지 않습니다.</li><li><strong>공개 URL 입력 후 검증</strong> — 본문·계정·원본 링크의 읽기 전용 검증이 성공해야 게시 완료로 기록됩니다.</li></ol><p>모바일에서 원고가 보이지 않으면 동기화 확인 전 게시·임시저장을 반복하지 마세요. 기존 저장 글과 이번 저장 글을 앱에서 취소·삭제하지 않습니다.</p><form onSubmit={(event) => askCompleteThreadsPublication(job, event)}><label className="field" htmlFor={`result-${job.id}`}>모바일에서 직접 게시한 실제 공개 URL<input id={`result-${job.id}`} type="url" required placeholder="https://www.threads.com/@…/post/…" disabled={editingLocked} value={resultInputs[job.id] ?? ''} onChange={(event) => setResultInputs((current) => ({ ...current, [job.id]: event.target.value }))} /></label><button type="submit" className="button primary" disabled={busy || !resultInputs[job.id]?.trim()}>공개 글 읽기 전용 확인</button></form></section>}
+                <div className="job-actions"><div className="button-row">{draft && <button type="button" className="button secondary compact" disabled={editingLocked} onClick={() => viewDraft(draft)}>원고 검토</button>}{['approved', 'draft', 'needs_attention'].includes(job.status) && <button type="button" className="text-button danger-text" disabled={busy} onClick={() => askCancel(job)}>작업 취소</button>}</div><div className="button-row">{job.resultUrl && <button type="button" className="button secondary compact" disabled={busy} onClick={() => { void execute({ type: 'openResult', jobId: job.id }); }}>실제 게시물 열기</button>}{job.status === 'approved' && !legacyThreadsPublish && <button type="button" className="button primary compact" disabled={busy || app.paused || (!threadsDraft && (future || overdue))} onClick={() => askRun(job)}>{threadsDraft ? '웹 임시저장 실행' : future ? '예약 시각에 자동 게시' : overdue ? '예약 재검토 필요' : '지금 게시 확인'}</button>}</div></div>
                 {job.resultUrl && <p className="result-url" title={job.resultUrl}>{job.resultUrl}</p>}
               </article>;
             })}{!filteredJobs.length && <section className="card"><EmptyState title={app.jobs.length ? '해당하는 작업이 없습니다' : '아직 승인한 작업이 없습니다'} action={!app.jobs.length ? <button type="button" className="button primary" onClick={() => setPanel('drafts')}>원고 검토하기</button> : undefined}>{app.jobs.length ? '다른 필터를 선택해 작업 상태를 확인하세요.' : '검토한 원고를 승인하면 여기에 게시 대상, 버전과 예약 시각이 표시됩니다.'}</EmptyState></section>}</div></section>
@@ -523,9 +603,10 @@ export default function App() {
               <li>상품명·가격·판매 상태와 해당 쉐어링크를 확인합니다. 추가 메모는 선택이며, 수집된 정보를 다시 입력할 필요는 없습니다.</li>
               <li>채널별 원고 생성을 눌러 Aside가 작성한 두 채널의 원고를 받습니다.</li>
               <li>사실관계·광고 고지·링크를 검토하고 서비스가 제공하는 미리보기도 확인합니다.</li>
-              <li>게시 계정·원고 버전·예약 여부를 확인하고 게시 준비를 승인합니다.</li>
-              <li>게시 작업에서 실제 게시를 확인합니다. 예약은 승인한 시각에 실행됩니다.</li>
-              <li>작업 결과의 실제 공개 URL을 열어 계정·본문·링크를 최종 확인합니다.</li>
+              <li>네이버는 게시 계정·원고 버전·예약 여부를 확인해 승인합니다. 이후 Aside가 게시하며 예약은 승인한 시각에 자동 실행됩니다.</li>
+              <li>Threads는 별도의 임시저장 승인 후 새 비공개 WEB 임시저장만 실행합니다. 기존 저장 글은 보존하고, 공개·예약 게시하지 않습니다.</li>
+              <li>웹 저장 확인 후 같은 계정의 모바일에서 동기화를 직접 확인합니다. 아직 검증되지 않은 동기화를 보장하거나 모바일 게시를 자동화하지 않습니다.</li>
+              <li>모바일에서 필수 협찬 광고 레이블을 직접 적용해 최종 게시하고, 공개 URL을 입력해 본문·계정·링크 읽기 전용 검증을 마칩니다.</li>
             </ol></section>
             <div className="settings-layout">
             <form className="settings-form" onSubmit={(event) => { void saveSettings(event); }}><fieldset disabled={editingLocked}>
@@ -540,7 +621,7 @@ export default function App() {
               <section className="card"><div className="card-heading"><div><span className="eyebrow">ASIDE WORK TABS</span><h2>작업 탭</h2></div></div><div className="form-grid"><div className="field full"><label className="checkbox-field" htmlFor="use-work-tabs"><input id="use-work-tabs" type="checkbox" checked={settingsForm.useWorkTabs} onChange={(event) => changeSettings({ useWorkTabs: event.target.checked })} aria-describedby="work-tabs-description" />새 작업 탭 사용</label><p id="work-tabs-description">이 설정을 켜고 저장한 경우에만 Aside의 기존 로그인을 사용하는 새 작업 탭을 만듭니다. 절전·언로드된 사용자 탭을 강제로 깨우거나 권한을 바꾸지 않고 작업할 수 있습니다.</p><small>끄면 기존 탭을 사용합니다. 필요한 탭을 직접 열어 화면이 표시되게 하세요. 여러 대상 탭이 있으면 Aside에서 사용할 탭을 직접 선택해야 합니다. 쿠키·프로필은 복사하지 않으며 접근 제한은 우회하지 않습니다.</small></div></div></section>
               <div className="settings-save"><span className="muted">설정을 바꾼 뒤에는 기존 작업의 게시 대상도 확인하세요.</span><button type="submit" className="button primary" disabled={busy || !settingsDirty}>설정 저장</button></div>
             </fieldset></form>
-            <aside className="settings-aside"><section className="card"><span className="eyebrow">ASIDE CONNECTION</span><h2>Aside 연결</h2><p>원고 생성과 네이버·Threads 게시 모두 Aside가 처리합니다. 이 PC에서 Aside 앱과 CLI를 실행할 수 있어야 하며, 게시는 Aside의 기존 서비스 로그인을 사용합니다.</p><div className="stacked-buttons"><button type="button" className="button secondary" disabled={busy || settingsDirty} onClick={() => { void execute({ type: 'openBrowser', channel: 'toss' }); }}>토스 탭 연결</button><button type="button" className="button secondary" disabled={busy || settingsDirty} onClick={() => { void execute({ type: 'openBrowser', channel: 'naver' }); }}>네이버 탭 연결</button></div><p className="small-text">설정을 먼저 저장하세요. 탭 연결은 게시 승인이나 실제 게시가 아닙니다. 로그인 만료·권한 요청·보안 경고가 나타나면 Aside에서 직접 확인하세요. 자동화 중에는 작업 탭에서 이동하거나 편집하지 마세요.</p></section><section className="card policy-card"><h2>미리보기와 이미지</h2><ul><li>본문의 링크에 서비스가 제공하는 기본 미리보기가 있으면 유지합니다. 이 앱은 실제 서비스 미리보기를 재현하지 않습니다.</li><li>미리보기·이미지 표시는 서비스와 링크에 따라 달라지며 항상 표시된다고 보장하지 않습니다.</li><li>직접 이미지 업로드는 지원하지 않습니다. 향후 사용 권한을 검증하는 절차 없이 이미지를 수집·첨부하지 않습니다.</li></ul></section><section className="card policy-card"><h2>안전한 게시</h2><ul><li>원고 사실관계·광고 고지·링크·게시 계정을 검토하고 승인하세요.</li><li>예약 시각에는 PC, Auto Flow 앱과 Aside가 실행 중이어야 합니다. 2분 넘게 놓친 예약은 다시 검토하고 승인하세요.</li><li>앱 종료·응답 시간 초과 뒤에도 원격 Aside 작업은 계속될 수 있습니다. 결과가 불확실하면 게시 작업의 세션 결과와 실제 계정을 확인하고, 무작정 다시 실행하지 마세요.</li><li>브라우저 화면·서비스 정책 변경이나 접근 제한으로 중단되면 원본 화면을 확인하세요. 권한 우회·자동 재시도는 하지 않습니다.</li></ul></section></aside>
+            <aside className="settings-aside"><section className="card"><span className="eyebrow">ASIDE CONNECTION</span><h2>Aside 연결</h2><p>원고 생성·네이버 게시·Threads WEB 임시저장을 Aside가 처리합니다. 이 PC에서 Aside 앱과 CLI가 실행 가능해야 하며 기존 서비스 로그인을 사용합니다. Threads 최종 공개 게시는 같은 계정의 모바일에서 사용자가 직접 합니다. 동기화는 미검증이며 모바일 자동 게시 기능은 없습니다.</p><div className="stacked-buttons"><button type="button" className="button secondary" disabled={busy || settingsDirty} onClick={() => { void execute({ type: 'openBrowser', channel: 'toss' }); }}>토스 탭 연결</button><button type="button" className="button secondary" disabled={busy || settingsDirty} onClick={() => { void execute({ type: 'openBrowser', channel: 'naver' }); }}>네이버 탭 연결</button></div><p className="small-text">설정을 먼저 저장하세요. 탭 연결은 게시·임시저장 승인이나 실행이 아닙니다. 로그인 만료·권한 요청·보안 경고가 나타나면 Aside에서 직접 확인하세요. 자동화 중에는 작업 탭에서 이동하거나 편집하지 마세요.</p></section><section className="card policy-card"><h2>미리보기와 이미지</h2><ul><li>본문의 링크에 서비스가 제공하는 기본 미리보기가 있으면 유지합니다. 이 앱은 실제 서비스 미리보기를 재현하지 않습니다.</li><li>미리보기·이미지 표시는 서비스와 링크에 따라 달라지며 항상 표시된다고 보장하지 않습니다.</li><li>직접 이미지 업로드는 지원하지 않습니다. 향후 사용 권한을 검증하는 절차 없이 이미지를 수집·첨부하지 않습니다.</li></ul></section><section className="card policy-card"><h2>안전한 게시·임시저장</h2><ul><li>원고 사실관계·광고 고지·링크·대상 계정을 검토하고 채널별 실행 범위를 구분해 승인하세요.</li><li>네이버 예약 시각에는 PC, Auto Flow 앱과 Aside가 실행 중이어야 합니다. 2분 넘게 놓친 예약은 다시 검토하고 승인하세요. Threads에는 예약·자동 공개 게시가 없습니다.</li><li>Threads는 새 WEB 임시저장만 만들고 기존 저장 글은 보존합니다. 모바일에서 동기화와 필수 협찬 광고 레이블을 직접 확인·적용해 게시한 뒤 공개 URL을 검증하세요.</li><li>앱 종료·응답 시간 초과 뒤에도 원격 Aside 작업은 계속될 수 있습니다. 결과가 불확실하면 같은 세션과 실제 WEB 저장 목록·공개 계정을 확인하고, 무작정 다시 실행하지 마세요.</li><li>브라우저 화면·서비스 정책 변경이나 접근 제한으로 중단되면 원본 화면을 확인하세요. 권한 우회·자동 재시도는 하지 않습니다.</li></ul></section></aside>
           </div></>}
         </>}
         <footer className="page-footer"><span>Auto Flow <span className="footer-divider">/</span> 개인용 게시 도구</span><p>게시 결정은 직접 승인하세요. 불확실한 결과는 Aside 세션과 실제 게시물에서 확인하고 중복 게시하지 마세요.</p></footer>

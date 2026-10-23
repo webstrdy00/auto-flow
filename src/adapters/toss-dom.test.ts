@@ -63,9 +63,11 @@ function detailHtml(product: FixtureProduct, soldOut: boolean, extraPrice = ''):
     <main>
       ${soldOut ? '<div role="status" aria-label="품절. 상품이 재입고되면 구매할 수 있어요"></div>' : ''}
       <section>
-        <div><img src="https://example.invalid/product.png"></div>
+        <div data-sentry-component="ProductImageColumn" data-sentry-source-file="product-detail-page.tsx">
+          <img src="https://example.invalid/product.png"><img src="https://example.invalid/seller-logo.png">
+          <div><span>다른 구성의 참고 금액은 19,700원입니다.</span></div>
+        </div>
         <div data-fixture="price-panel">
-          <img src="https://example.invalid/seller-logo.png">
           <span class="pc14-wed5fi0 xh8yej3" data-sentry-element="Txt" data-sentry-source-file="product-detail-page.tsx">${htmlText(product.name)}</span>
           <span class="pc14-wed5fi0 xh8yej3">원산지: 상세페이지 참조</span>
           <span>개당 ${product.commission} 수익</span>
@@ -697,6 +699,38 @@ test('detail DOM recognizes sold-out status outside the price panel and ignores 
   assert.deepEqual(sandbox.clicks, []);
   assert.ok(!sandbox.events.includes('return-home'));
   assertReadOnly(sandbox);
+});
+
+test('ranking collection excludes observed image-column description prices but verifies the separated title and stock status', async () => {
+  const sandbox = domSandbox({ home: true, listUrl: rankingUrl, detailSoldOut: true });
+  const runner: AsideRunner = async <T>(script: string) => {
+    const result = await sandbox.runner<T>(script);
+    const detail = sandbox.evaluations.find(evaluation => evaluation.url === sourceUrl(wipes));
+    if (detail) assert.deepEqual(detail.input, { detail: true, expectedName: wipes.name });
+    return result;
+  };
+  const result = await new BrowserAutomation(runner).scanProducts();
+  assertScannedProduct(result.products, wipes, true);
+  assert.deepEqual(result.skipped, []);
+  assert.deepEqual(sandbox.clicks.map(click => click.name), [wipes.name]);
+  assertReadOnly(sandbox);
+});
+
+test('description prices never replace a missing sale price or resolve conflicting visible sale prices', async () => {
+  for (const missingPrice of [true, false]) {
+    const sandbox = domSandbox({ extraPrice: missingPrice ? '' : '6,990원' });
+    const document = sandbox.document();
+    const description = document.querySelector('[data-sentry-component="ProductImageColumn"]')!;
+    const panel = document.querySelector('[data-fixture="price-panel"]')!;
+    assert.ok(normalize(description.textContent).includes('19,700원'));
+    assert.equal(description.contains(panel), false);
+    assert.equal(panel.querySelector('img'), null, 'The actual detail image is outside the name/price/issue panel');
+    if (missingPrice) [...panel.querySelectorAll('span')].find(element => element.textContent === wipes.price)!.remove();
+    await assert.rejects(new BrowserAutomation(sandbox.runner).scanProducts(() => assert.fail('An ambiguous or absent sale price cannot be saved')),
+      /AF:.*현재 표시 가격 하나/);
+    assert.deepEqual(sandbox.clicks, []);
+    assertReadOnly(sandbox);
+  }
 });
 
 test('observed detail title classes also match origin metadata without making it a second product name', async () => {

@@ -83,7 +83,7 @@ test('fresh browser storage has no legacy API metadata and requires explicit acc
   store.saveDraft(draft());
   store.saveDraft(draft('threads'));
   assert.throws(() => store.approve('draft-naver', null), /블로그/);
-  assert.throws(() => store.approve('draft-threads', null), /핸들/);
+  assert.throws(() => store.approveThreadsDraft('draft-threads'), /핸들/);
   assert.equal(store.state().settings.naverBlogId, '');
   assert.equal(store.state().settings.threadsHandle, '');
   assert.equal(store.state().settings.useWorkTabs, true);
@@ -181,10 +181,10 @@ test('Threads approval rejects punctuation and additional links before any publi
   for (const suffix of ['.', ')', '\nhttps://toss.im/another']) {
     const current = store.state().drafts[0]!;
     store.saveDraft({ ...current, body: original.body + suffix });
-    assert.throws(() => store.approve(original.id, null), /쉐어링크/);
+    assert.throws(() => store.approveThreadsDraft(original.id), /쉐어링크/);
   }
   store.saveDraft({ ...store.state().drafts[0]!, body: original.body });
-  assert.equal(store.approve(original.id, null).status, 'approved');
+  assert.equal(store.approveThreadsDraft(original.id).status, 'approved');
 });
 
 test('product fields are validated before any stored data is replaced', t => {
@@ -234,7 +234,7 @@ test('observed Toss Shopping links are preserved and approved on both channels',
   store.saveDraft(draft('naver', { body: `${DISCLOSURE}\n${saved.shareUrl}` }));
   assert.equal(store.approve('draft-naver', null).status, 'approved');
   store.saveDraft(draft('threads', { body: `${DISCLOSURE}\n${saved.shareUrl}` }));
-  assert.equal(store.approve('draft-threads', null).status, 'approved');
+  assert.equal(store.approveThreadsDraft('draft-threads').status, 'approved');
   assert.throws(() => store.saveProduct(product({ shareUrl: 'https://shop.toss.im/shared-item' })));
 });
 
@@ -314,15 +314,15 @@ test('Threads uses Unicode code points, allows an empty title, and requires its 
   const prefix = `${DISCLOSURE}\nhttps://toss.im/example-link\n`;
   const body = prefix + '😀'.repeat(500 - Array.from(prefix).length);
   store.saveDraft(draft('threads', { body }));
-  const approved = store.approve('draft-threads', null);
+  const approved = store.approveThreadsDraft('draft-threads');
   store.cancel(approved.id);
   store.saveDraft(draft('threads', { body: `${body}😀` }));
-  assert.throws(() => store.approve('draft-threads', null), /500/);
+  assert.throws(() => store.approveThreadsDraft('draft-threads'), /500/);
   store.saveDraft(draft('threads', { body }));
   store.saveSettings({ ...settings, threadsHandle: '' });
-  assert.throws(() => store.approve('draft-threads', null), /핸들/);
+  assert.throws(() => store.approveThreadsDraft('draft-threads'), /핸들/);
   store.saveSettings({ ...settings, threadsHandle: '@person', useWorkTabs: false });
-  const next = store.approve('draft-threads', null);
+  const next = store.approveThreadsDraft('draft-threads');
   assert.equal(next.target, 'person');
   assert.equal(store.claim(next.id).status, 'running');
 });
@@ -356,7 +356,7 @@ test('target changes invalidate only relevant approvals and tone changes preserv
   seed(store);
   store.saveDraft(draft('threads'));
   const naver = store.approve('draft-naver', null);
-  const threads = store.approve('draft-threads', null);
+  const threads = store.approveThreadsDraft('draft-threads');
   const edited = { ...settings, tone: '다른 문체' };
   store.saveSettings(edited);
   assert.equal(status(store, naver.id), 'approved');
@@ -375,13 +375,13 @@ test('work-tab changes invalidate approvals on both channels and require fresh a
     seed(store);
     store.saveSettings({ ...settings, useWorkTabs });
     store.saveDraft(draft('threads'));
-    const jobs = [store.approve('draft-naver', null), store.approve('draft-threads', null)];
+    const jobs = [store.approve('draft-naver', null), store.approveThreadsDraft('draft-threads')];
     store.saveSettings({ ...settings, useWorkTabs: !useWorkTabs });
     for (const job of jobs) {
       assert.equal(status(store, job.id), 'needs_attention');
       assert.throws(() => store.claim(job.id), /승인/);
     }
-    assert.equal(store.claim(store.approve('draft-threads', null).id).status, 'running');
+    assert.equal(store.claim(store.approveThreadsDraft('draft-threads').id).status, 'running');
   }
 });
 
@@ -411,7 +411,7 @@ test('settings normalize a single optional @ and preserve ordinary numeric handl
     store.saveSettings({ ...settings, threadsHandle });
     const expected = threadsHandle.replace(/^@/, '');
     assert.equal(store.state().settings.threadsHandle, expected);
-    const approved = store.approve('draft-threads', null);
+    const approved = store.approveThreadsDraft('draft-threads');
     assert.equal(approved.target, expected);
     store.cancel(approved.id);
   }
@@ -442,7 +442,7 @@ test('new draft IDs cannot bypass an active approval for the same product and ch
   store.saveDraft(draft('threads'));
   const original = store.approve('draft-naver', null);
   assert.throws(() => store.approve('another-draft', null), /이미 승인/);
-  assert.equal(store.approve('draft-threads', null).status, 'approved');
+  assert.equal(store.approveThreadsDraft('draft-threads').status, 'approved');
   store.claim(original.id);
   assert.throws(() => store.approve('another-draft', null), /진행 중/);
   store.finish(original.id, 'uncertain', '게시 여부를 확인해야 합니다.');
@@ -541,18 +541,20 @@ test('finish accepts only claimed outcomes and validates channel-specific public
   assert.throws(() => store.finish(job.id, 'uncertain', '다시 완료'), /실행 중/);
 });
 
-test('uncertain results never retry and only a matching channel public URL reconciles them', t => {
+test('legacy uncertain results never retry and only a matching public URL reconciles them', t => {
   clock(t);
-  const store = memory(t);
+  const { store, path } = disk(t);
   seed(store, 'threads');
-  const job = store.approve('draft-threads', null);
+  const job = store.approveThreadsDraft('draft-threads');
   store.claim(job.id);
+  const external = new DatabaseSync(path);
+  try { external.prepare('DELETE FROM threads_draft_intents WHERE job_id = ?').run(job.id); } finally { external.close(); }
   store.finish(job.id, 'uncertain', '연결이 끊겨 실제 게시 여부를 확인해야 합니다.');
   assert.throws(() => store.claim(job.id), /승인/);
   assert.throws(() => store.cancel(job.id), /취소할 수 없습니다/);
-  assert.throws(() => store.approve('draft-threads', null), /불명확/);
+  assert.throws(() => store.approveThreadsDraft('draft-threads'), /불명확/);
   store.saveDraft(draft('threads', { body: `${draft('threads').body}\n변경` }));
-  assert.throws(() => store.approve('draft-threads', null), /불명확/);
+  assert.throws(() => store.approveThreadsDraft('draft-threads'), /불명확/);
   const invalid = [
     'https://blog.naver.com/my_blog/987', 'https://threads.com/@person',
     'https://threads.com/@person/post/', 'https://threads.com/@person/post/abc/extra',
@@ -565,7 +567,7 @@ test('uncertain results never retry and only a matching channel public URL recon
   store.reconcile(job.id, 'https://www.threads.net/@person/post/Ab_c-123');
   assert.equal(status(store, job.id), 'published');
   assert.throws(() => store.reconcile(job.id, 'https://threads.com/@person/post/other'), /불명확/);
-  const reviewedRevision = store.approve('draft-threads', null);
+  const reviewedRevision = store.approveThreadsDraft('draft-threads');
   assert.equal(reviewedRevision.version, 2);
 });
 
@@ -613,14 +615,16 @@ test('Threads completion is bound to the approved handle even after account and 
   clock(t);
   const store = memory(t);
   seed(store, 'threads');
-  const job = store.approve('draft-threads', null);
+  const job = store.approveThreadsDraft('draft-threads');
   store.claim(job.id);
+  store.bindAsideSession(job.id, 'Draft_saved_session');
+  store.markThreadsDraftSaved(job.id, 'visible');
   store.saveSettings({ ...settings, threadsHandle: 'other', useWorkTabs: false });
   for (const target of ['other', 'person.extra', 'Person']) {
-    assert.throws(() => store.finish(job.id, 'published', '확인', `https://threads.com/@${target}/post/abc`), /대상 Threads/);
-    assert.equal(status(store, job.id), 'running');
+    assert.throws(() => store.completeThreadsPublication(job.id, `https://threads.com/@${target}/post/abc`), /대상 Threads/);
+    assert.equal(status(store, job.id), 'awaiting_publication');
   }
-  store.finish(job.id, 'published', '승인한 계정의 게시물을 확인했습니다.', 'https://www.threads.com/@person/post/abc');
+  store.completeThreadsPublication(job.id, 'https://www.threads.com/@person/post/abc');
   assert.equal(store.state().jobs[0]!.target, 'person');
   assert.equal(store.state().jobs[0]!.resultUrl, 'https://www.threads.com/@person/post/abc');
 });
@@ -705,7 +709,7 @@ test('claim rejects malformed persisted freshness values and changed Threads acc
   for (const sql of ["UPDATE products SET checked_at = 'invalid'", "UPDATE browser_preferences SET threads_handle = 'other'", 'UPDATE browser_preferences SET use_work_tabs = 0']) {
     const { store, path } = disk(t);
     seed(store, 'threads');
-    const job = store.approve('draft-threads', null);
+    const job = store.approveThreadsDraft('draft-threads');
     const external = new DatabaseSync(path);
     try { external.exec(sql); } finally { external.close(); }
     assert.throws(() => store.claim(job.id), /시각|변경/);
@@ -784,4 +788,125 @@ test('closed stores reject operations without reopening or altering persisted st
   assert.throws(() => store.state(), /닫힌 저장소/);
   assert.throws(() => store.saveProduct(product()), /닫힌 저장소/);
   assert.throws(() => store.saveSettings(settings), /닫힌 저장소/);
+});
+
+test('saved Threads drafts project awaiting publication after reopen without changing the job table schema', t => {
+  clock(t);
+  const { store, path, open } = disk(t);
+  seed(store, 'threads');
+  const external = new DatabaseSync(path);
+  try {
+    const schema = external.prepare("SELECT sql FROM sqlite_master WHERE name = 'browser_jobs'").get()!.sql;
+    const job = store.approveThreadsDraft('draft-threads');
+    assert.equal(job.operation, 'threads_draft');
+    assert.equal(job.scheduledAt, null);
+    store.claim(job.id);
+    assert.throws(() => store.markThreadsDraftSaved(job.id, 'visible'), /Aside/);
+    store.bindAsideSession(job.id, 'Saved_session');
+    assert.throws(() => store.finish(job.id, 'published', '잘못된 완료', 'https://threads.com/@person/post/abc'), /공개 게시 완료가 아닙니다/);
+    store.markThreadsDraftSaved(job.id, 'visible');
+    const saved = store.state();
+    assert.equal(saved.jobs[0]!.status, 'awaiting_publication');
+    assert.equal(saved.jobs[0]!.resultUrl, '');
+    assert.match(saved.jobs[0]!.message, /아직 공개 게시되지/);
+    const receipt = external.prepare('SELECT * FROM threads_draft_intents WHERE job_id = ?').get(job.id);
+    assert.equal(external.prepare('SELECT status FROM browser_jobs WHERE id = ?').get(job.id)!.status, 'needs_attention');
+    assert.equal(external.prepare("SELECT sql FROM sqlite_master WHERE name = 'browser_jobs'").get()!.sql, schema);
+    t.mock.timers.setTime(NOW + 1000);
+    store.markThreadsDraftSaved(job.id, 'visible');
+    assert.deepEqual(store.state(), saved);
+    assert.deepEqual(external.prepare('SELECT * FROM threads_draft_intents WHERE job_id = ?').get(job.id), receipt);
+    assert.throws(() => store.markThreadsDraftSaved(job.id, 'unavailable'), /변경/);
+    assert.throws(() => store.cancel(job.id), /취소할 수 없습니다/);
+    store.close();
+    assert.deepEqual(open().state(), saved);
+  } finally { external.close(); }
+});
+
+test('Threads draft handoff freezes approved content and blocks duplicate owners across draft IDs and versions', t => {
+  clock(t);
+  const { store, open } = disk(t);
+  seed(store, 'threads');
+  const approvedProduct = store.state().products[0]!;
+  store.saveDraft(draft('threads', { id: 'another-version', version: 99 }));
+  const second = open();
+  const job = store.approveThreadsDraft('draft-threads');
+  assert.throws(() => second.approveThreadsDraft('another-version'), /이미 승인/);
+  store.claim(job.id);
+  assert.throws(() => store.saveDraft(draft('threads')), /수정할 수 없습니다/);
+  assert.throws(() => second.approveThreadsDraft('another-version'), /진행 중/);
+  store.bindAsideSession(job.id, 'Immutable_session');
+  store.finish(job.id, 'uncertain', '저장 결과를 확인하세요.');
+  assert.throws(() => store.saveDraft(draft('threads')), /수정할 수 없습니다/);
+  assert.throws(() => store.confirmNotPublished(job.id), /초안 없음/);
+  assert.throws(() => store.reconcile(job.id, 'https://threads.com/@person/post/abc'), /별도로 확인/);
+  assert.throws(() => second.approveThreadsDraft('another-version'), /불명확/);
+  store.markThreadsDraftSaved(job.id, 'unavailable');
+  store.saveProduct(product({ price: '15,000원', shareUrl: 'https://toss.im/changed', soldOut: true }));
+  store.saveSettings({ ...settings, threadsHandle: 'other', useWorkTabs: false });
+  assert.deepEqual(store.threadsDraftProduct(job.id), approvedProduct);
+  assert.equal(status(store, job.id), 'awaiting_publication');
+  assert.throws(() => store.saveDraft(draft('threads')), /수정할 수 없습니다/);
+  store.saveDraft(draft('threads', { id: 'another-version', body: `${DISCLOSURE}\nhttps://toss.im/changed` }));
+  store.saveProduct(product({ price: '15,000원', shareUrl: 'https://toss.im/changed' }));
+  assert.throws(() => second.approveThreadsDraft('another-version'), /게시 대기/);
+  assert.throws(() => store.confirmDraftNotSaved(job.id), /불명확/);
+  assert.throws(() => store.completeThreadsPublication(job.id, 'https://threads.com/@other/post/abc'), /대상 Threads/);
+  t.mock.timers.setTime(NOW + DAY * 2);
+  store.completeThreadsPublication(job.id, 'https://threads.com/@person/post/abc');
+  assert.equal(status(store, job.id), 'published');
+  assert.equal(store.state().jobs[0]!.asideSessionId, 'Immutable_session');
+});
+
+test('uncertain draft cancellation retains sessions and only unsaved reviewed drafts may be reapproved', t => {
+  clock(t);
+  const store = memory(t);
+  seed(store, 'threads');
+  const job = store.approveThreadsDraft('draft-threads');
+  assert.throws(() => store.completeThreadsPublication(job.id, 'https://threads.com/@person/post/abc'), /게시 대기/);
+  assert.throws(() => store.confirmDraftNotSaved(job.id), /불명확/);
+  store.claim(job.id);
+  store.bindAsideSession(job.id, 'Cancelled_session');
+  store.finish(job.id, 'uncertain', '저장 여부를 확인하세요.');
+  store.confirmDraftNotSaved(job.id);
+  assert.equal(status(store, job.id), 'cancelled');
+  assert.equal(store.state().jobs[0]!.asideSessionId, 'Cancelled_session');
+  store.saveDraft(draft('threads'));
+  const next = store.approveThreadsDraft('draft-threads');
+  store.claim(next.id);
+  store.finish(next.id, 'needs_attention', '저장 요청 전 검증에서 중단했습니다.');
+  store.saveDraft(draft('threads'));
+  assert.equal(store.approveThreadsDraft('draft-threads').status, 'approved');
+});
+
+test('legacy Threads approvals never execute and startup preserves uncertain published rows and sessions', t => {
+  clock(t);
+  const { store, path, open } = disk(t);
+  seed(store, 'threads');
+  for (const id of ['124', '125']) {
+    store.saveProduct(product({ id, sourceUrl: `https://sharelink.toss.im/links/products/${id}` }));
+    store.saveDraft(draft('threads', { id: `legacy-${id}`, productId: id }));
+  }
+  const approved = store.approveThreadsDraft('draft-threads');
+  const uncertain = store.approveThreadsDraft('legacy-124');
+  const published = store.approveThreadsDraft('legacy-125');
+  const external = new DatabaseSync(path);
+  try {
+    external.exec('DELETE FROM threads_draft_intents');
+    external.prepare("UPDATE browser_jobs SET status = 'uncertain', message = '원래 불명확 기록' WHERE id = ?").run(uncertain.id);
+    external.prepare("UPDATE browser_jobs SET status = 'published', result_url = 'https://threads.com/@person/post/existing', message = '원래 공개 기록' WHERE id = ?").run(published.id);
+    external.prepare('INSERT INTO aside_sessions VALUES (?, ?)').run(uncertain.id, 'Legacy_session');
+    const original = external.prepare('SELECT * FROM browser_jobs WHERE id IN (?, ?) ORDER BY id').all(uncertain.id, published.id);
+    assert.throws(() => store.claim(approved.id), /이전 Threads/);
+    assert.equal(status(store, approved.id), 'needs_attention');
+    external.prepare("UPDATE browser_jobs SET status = 'approved', scheduled_at = ? WHERE id = ?").run(new Date(NOW + DAY).toISOString(), approved.id);
+    store.close();
+    const reopened = open();
+    assert.equal(status(reopened, approved.id), 'needs_attention');
+    assert.deepEqual(external.prepare('SELECT * FROM browser_jobs WHERE id IN (?, ?) ORDER BY id').all(uncertain.id, published.id), original);
+    assert.equal(reopened.state().jobs.find(row => row.id === uncertain.id)!.asideSessionId, 'Legacy_session');
+    assert.throws(() => reopened.approve('draft-threads', null), /별도로 승인/);
+    assert.throws(() => reopened.approve('draft-threads', new Date(NOW + DAY).toISOString()), /별도로 승인/);
+    assert.equal(reopened.approveThreadsDraft('draft-threads').operation, 'threads_draft');
+  } finally { external.close(); }
 });

@@ -14,13 +14,17 @@ export function smokeServices() {
       { channel: 'naver', title: '구성을 확인하는 원고', body: `${data.name}\n표시 가격 ${data.price}. 구매 전 구성을 확인하세요.` },
       { channel: 'threads', title: '간결한 구성 안내', body: `${data.name}: 표시 가격 ${data.price}.` },
     ] } as T };
-    publicationCalls++;
+    if (data.operation !== 'verify_publication') publicationCalls++;
     await request.onSession?.(sessionId);
-    const value = { requestId: request.requestId, channel: data.channel, target: data.target, published: true,
+    const value = data.operation === 'save_draft'
+      ? { requestId: data.requestId, channel: 'threads', target: data.target, operation: 'save_draft',
+        saved: true, published: false, verifiedOwner: true, verifiedText: true, verifiedDisclosure: true,
+        verifiedAffiliateUrl: data.product.shareUrl, verifiedDraftReopened: true, previewStatus: 'visible' }
+      : { requestId: data.requestId, channel: data.channel, target: data.target, published: true,
       url: data.channel === 'naver' ? `https://blog.naver.com/${data.target}/123456789` : `https://www.threads.com/@${data.target}/post/Smoke123`,
-      verifiedOwner: true, verifiedText: true, verifiedDisclosure: true, verifiedAffiliateUrl: data.product.shareUrl, previewStatus: 'visible' };
+      verifiedOwner: true, verifiedText: true, verifiedDisclosure: true, verifiedAffiliateUrl: data.operation === 'verify_publication' ? data.shareUrl : data.product.shareUrl, previewStatus: 'visible' };
     receipts.set(sessionId, value);
-    if (data.channel === 'threads') throw new Error('Simulated client timeout after task admission');
+    if (data.operation === 'save_draft') throw new Error('Simulated client timeout after task admission');
     return { sessionId, value: value as T };
   };
   const workflow = new AsideWorkflow(runner, async <T>(sessionId: string) => ({ status: 'complete' as const, value: receipts.get(sessionId) as T }));
@@ -67,7 +71,7 @@ export async function runSmoke(window: BrowserWindow): Promise<void> {
     if(state.jobs.some(j=>j.status==='approved')) throw new Error('Edit did not invalidate approval');
     for(const channel of ['naver','threads']) {
       draft=state.drafts.find(d=>d.channel===channel);
-      state=await api.execute({type:'approve',draftId:draft.id,scheduledAt:null});
+      state=await api.execute(channel==='threads'?{type:'approveThreadsDraft',draftId:draft.id}:{type:'approve',draftId:draft.id,scheduledAt:null});
       const job=state.jobs.find(j=>j.draftId===draft.id&&j.status==='approved');
       state=await api.execute({type:'runJob',jobId:job.id});
       const finished=state.jobs.find(j=>j.id===job.id);
@@ -75,15 +79,19 @@ export async function runSmoke(window: BrowserWindow): Promise<void> {
       if(channel==='threads') {
         if(finished.status!=='uncertain') throw new Error('Timeout was not quarantined');
         state=await api.execute({type:'checkJob',jobId:job.id});
+        if(state.jobs.find(j=>j.id===job.id).status!=='awaiting_publication')throw new Error('Saved draft falsely marked public');
+        let publicBypass=false;try{await api.execute({type:'reconcile',jobId:job.id,resultUrl:'https://www.threads.com/@autoflow_test/post/Smoke123'});}catch{publicBypass=true;}
+        if(!publicBypass)throw new Error('Manual publication bypass was allowed');
       }
-      if(state.jobs.find(j=>j.id===job.id).status!=='published') throw new Error('App publication/recovery did not complete');
+      if(state.jobs.find(j=>j.id===job.id).status!==(channel==='threads'?'awaiting_publication':'published')) throw new Error('App publication/recovery did not complete');
     }
     await api.execute({type:'pause',paused:true});
     state=await api.execute({type:'state'});
     let rejected=false;try{await api.execute({type:'unknown-command'});}catch{rejected=true;}
     if(!rejected||!state.paused) throw new Error('Pause or invalid command protection failed');
     return {bridge:true,nodeExposed:false,productCount:state.products.length,draftCount:state.drafts.length,
-      approvalInvalidated:true,paused:true,invalidCommandRejected:true,mockedChannelsPublished:2,recoveredWithoutRepublish:true};
+      approvalInvalidated:true,paused:true,invalidCommandRejected:true,mockedNaverPublished:true,mockedThreadsDraftSaved:true,
+      recoveredWithoutRepublish:true};
   })()`);
   await reloadRenderer(window);
   const ui = await window.webContents.executeJavaScript(`(async () => {
@@ -93,12 +101,22 @@ export async function runSmoke(window: BrowserWindow): Promise<void> {
     const generationButton=Array.from(document.querySelectorAll('button')).find(b=>b.textContent.includes('채널별 원고 생성'));
     if(!generationButton||generationButton.disabled)throw new Error('Optional empty notes blocked generation');
     const panels=['상품','원고 검토','게시 작업','설정'];
-    for(let i=0;i<panels.length;i++){document.querySelectorAll('.nav-item')[i].click();await wait(()=>document.querySelector('h1')?.textContent===panels[i]);}
+    for(let i=0;i<panels.length;i++){
+      document.querySelectorAll('.nav-item')[i].click();await wait(()=>document.querySelector('h1')?.textContent===panels[i]);
+      if(i===2){
+        if(!document.body.textContent.includes('모바일'))throw new Error('Manual mobile handoff instructions missing');
+        const state=await window.autoFlow.execute({type:'state'});
+        const saved=state.jobs.find(j=>j.operation==='threads_draft'&&j.status==='awaiting_publication');
+        if(!saved)throw new Error('Saved draft missing from waiting state');
+        const done=await window.autoFlow.execute({type:'completeThreadsPublication',jobId:saved.id,resultUrl:'https://www.threads.com/@autoflow_test/post/Smoke123'});
+        if(done.jobs.find(j=>j.id===saved.id).status!=='published')throw new Error('Manual publication URL verification did not complete');
+      }
+    }
     await wait(()=>Array.from(document.querySelectorAll('input')).some(i=>i.value==='autoflow_test'));
     if(document.querySelector('input[type=password]'))throw new Error('Obsolete secret inputs remain');
     if(!document.body.textContent.includes('미리보기'))throw new Error('Preview guidance missing');
     if(document.querySelector('[role=alert]'))throw new Error('Renderer error');
-    return {title:document.title,panelsVerified:4,noApiKeyInputs:true};
+    return {title:document.title,panelsVerified:4,noApiKeyInputs:true,manualThreadsUrlVerified:true};
   })()`);
   console.log('SMOKE_OK', JSON.stringify({ ...result, ...ui }));
 }

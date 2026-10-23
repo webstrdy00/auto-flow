@@ -167,6 +167,8 @@ async function regions(page, detail, expectedName = '') {
       const visit = (root) => {
         const style = getComputedStyle(root);
         if (root.matches('del, s, [aria-hidden="true"]') || !visible(root) || style.textDecorationLine.includes('line-through')) return;
+        // The observed image column also renders seller descriptions with unrelated comparison prices.
+        if (detail && root.matches('[data-sentry-component="ProductImageColumn"][data-sentry-source-file="product-detail-page.tsx"]')) return;
         for (const node of root.childNodes) {
           if (node.nodeType === Node.TEXT_NODE) parts.push(node.textContent ?? '');
           else if (node.nodeType === Node.ELEMENT_NODE) visit(node);

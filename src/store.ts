@@ -7,7 +7,7 @@ const NUMERIC_ID = /^[1-9]\d{0,29}$/;
 const BLOG_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,49}$/;
 const PRODUCT_COLUMNS = 'id, name, source_url AS sourceUrl, price, sold_out AS soldOut, checked_at AS checkedAt, facts, share_url AS shareUrl';
 const DRAFT_COLUMNS = 'id, product_id AS productId, channel, title, body, version, updated_at AS updatedAt';
-const JOB_COLUMNS = "id, draft_id AS draftId, version, channel, target, scheduled_at AS scheduledAt, status, result_url AS resultUrl, message, updated_at AS updatedAt, COALESCE((SELECT session_id FROM aside_sessions WHERE job_id = browser_jobs.id), '') AS asideSessionId";
+const JOB_COLUMNS = "id, draft_id AS draftId, version, channel, CASE WHEN EXISTS (SELECT 1 FROM threads_draft_intents WHERE job_id = browser_jobs.id) THEN 'threads_draft' ELSE 'publish' END AS operation, target, scheduled_at AS scheduledAt, CASE WHEN status = 'needs_attention' AND EXISTS (SELECT 1 FROM threads_draft_intents WHERE job_id = browser_jobs.id AND saved_at IS NOT NULL) THEN 'awaiting_publication' ELSE status END AS status, result_url AS resultUrl, message, updated_at AS updatedAt, COALESCE((SELECT session_id FROM aside_sessions WHERE job_id = browser_jobs.id), '') AS asideSessionId";
 
 type ProductRow = Omit<Product, 'soldOut'> & { soldOut: number };
 type JobRow = Job & { productSnapshot: string; useWorkTabs: number };
@@ -163,6 +163,10 @@ export class Store {
         ) STRICT;
         CREATE UNIQUE INDEX IF NOT EXISTS browser_jobs_active_draft ON browser_jobs(draft_id) WHERE status IN ('approved', 'running', 'uncertain');
         CREATE UNIQUE INDEX IF NOT EXISTS browser_jobs_published_version ON browser_jobs(draft_id, version) WHERE status = 'published';
+        CREATE TABLE IF NOT EXISTS threads_draft_intents (
+          job_id TEXT PRIMARY KEY REFERENCES browser_jobs(id), saved_at TEXT,
+          preview_status TEXT CHECK (preview_status IN ('visible', 'unavailable')), approved_checked_at TEXT NOT NULL
+        ) STRICT;
         CREATE TABLE IF NOT EXISTS aside_sessions (
           job_id TEXT PRIMARY KEY REFERENCES browser_jobs(id), session_id TEXT NOT NULL
         ) STRICT;
@@ -177,9 +181,10 @@ export class Store {
       `);
       this.db.prepare('INSERT OR IGNORE INTO browser_preferences VALUES (1, ?, ?, ?, 1, 0)').run('', '', '친근하고 자연스러운 해요체로 소개해요. 짧은 문단에 상품 구성과 가격을 쉽게 전달하고, 도입과 마무리는 상품마다 다양하게 써요. 단가 계산은 늘어놓지 않고 필요한 확인사항만 짧게 덧붙여요. 직접 써 본 듯한 후기·검증되지 않은 효능·거짓 긴급성은 만들지 않아요.');
       this.atomic(() => {
-        const jobs = this.db.prepare(`SELECT ${JOB_COLUMNS} FROM browser_jobs WHERE status = 'running' OR (status = 'approved' AND scheduled_at IS NOT NULL AND scheduled_at <= ?)`).all(new Date().toISOString()) as unknown as Job[];
+        const jobs = this.db.prepare(`SELECT ${JOB_COLUMNS} FROM browser_jobs WHERE status = 'running' OR (status = 'approved' AND (channel = 'threads' AND NOT EXISTS (SELECT 1 FROM threads_draft_intents WHERE job_id = browser_jobs.id) OR scheduled_at IS NOT NULL AND scheduled_at <= ?))`).all(new Date().toISOString()) as unknown as Job[];
         for (const job of jobs) {
           if (job.status === 'running') this.transition(job.id, 'uncertain', '앱이 종료되어 게시 결과를 확인할 수 없습니다. 실제 게시 여부를 확인하세요.', '', '중단된 실행을 결과 불명확 상태로 복구했습니다.');
+          else if (job.channel === 'threads' && job.operation === 'publish') this.transition(job.id, 'needs_attention', '이전 Threads 공개 게시 승인은 실행하지 않습니다. 웹 임시저장을 별도로 승인하세요.', '', '이전 Threads 공개 게시 승인의 자동 실행을 차단했습니다.');
           else this.transition(job.id, 'needs_attention', '예약 시각이 지났습니다. 확인 후 다시 승인하세요.', '', '지난 예약의 자동 실행을 차단했습니다.');
         }
       });
@@ -304,6 +309,7 @@ export class Store {
       const existing = this.db.prepare(`SELECT ${DRAFT_COLUMNS} FROM drafts WHERE id = ?`).get(id) as unknown as Draft | undefined;
       if (existing && (existing.productId !== productId || existing.channel !== input.channel)) throw new Error('기존 초안의 상품과 채널은 변경할 수 없습니다. 새 초안을 만드세요.');
       if (this.db.prepare("SELECT id FROM browser_jobs WHERE draft_id = ? AND status = 'running'").get(id)) throw new Error('발행 중인 초안은 수정할 수 없습니다.');
+      if (this.db.prepare("SELECT browser_jobs.id FROM browser_jobs JOIN threads_draft_intents ON job_id = browser_jobs.id WHERE draft_id = ? AND (status = 'uncertain' OR status = 'needs_attention' AND saved_at IS NOT NULL)").get(id)) throw new Error('Threads 임시저장 또는 사용자 게시 결과를 확인하기 전에는 원고를 수정할 수 없습니다.');
       const version = (existing?.version ?? 0) + 1;
       if (!Number.isSafeInteger(version)) throw new Error('초안 버전 한도를 초과했습니다.');
       this.db.prepare(`INSERT INTO drafts (id, product_id, channel, title, body, version, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -329,21 +335,32 @@ export class Store {
   }
 
   approve(draftId: string, scheduledAt: string | null): Job {
+    return this.approveOperation(draftId, scheduledAt, 'publish');
+  }
+
+  approveThreadsDraft(draftId: string): Job {
+    return this.approveOperation(draftId, null, 'threads_draft');
+  }
+
+  private approveOperation(draftId: string, scheduledAt: string | null, operation: Job['operation']): Job {
     identifier(draftId, '초안 ID');
     const schedule = scheduledAt === null ? null : timestamp(scheduledAt, '예약 시각');
     return this.atomic(() => {
       if (schedule !== null && Date.parse(schedule) <= Date.now()) throw new Error('예약 시각은 미래여야 합니다.');
       const draft = this.draft(draftId);
+      if (operation === 'publish' && draft.channel === 'threads') throw new Error('Threads 공개 게시 승인은 지원하지 않습니다. 웹 임시저장을 별도로 승인하세요.');
+      if (operation === 'threads_draft' && draft.channel !== 'threads') throw new Error('Threads 원고만 웹 임시저장을 승인할 수 있습니다.');
       const product = this.product(draft.productId);
       const settings = this.settings();
       const target = this.validatePublication(draft, product, settings);
-      if (this.db.prepare("SELECT browser_jobs.id FROM browser_jobs JOIN drafts ON drafts.id = browser_jobs.draft_id WHERE drafts.product_id = ? AND browser_jobs.channel = ? AND browser_jobs.status IN ('running', 'uncertain')").get(draft.productId, draft.channel)) throw new Error('같은 상품과 채널의 진행 중이거나 결과가 불명확한 작업을 먼저 확인하세요. 자동 재시도하지 않습니다.');
+      if (this.db.prepare("SELECT browser_jobs.id FROM browser_jobs JOIN drafts ON drafts.id = browser_jobs.draft_id WHERE drafts.product_id = ? AND browser_jobs.channel = ? AND (browser_jobs.status IN ('running', 'uncertain') OR browser_jobs.status = 'needs_attention' AND EXISTS (SELECT 1 FROM threads_draft_intents WHERE job_id = browser_jobs.id AND saved_at IS NOT NULL))").get(draft.productId, draft.channel)) throw new Error('같은 상품과 채널의 진행 중이거나 결과가 불명확하거나 사용자 게시 대기 중인 작업을 먼저 확인하세요. 자동 재시도하지 않습니다.');
       if (this.db.prepare("SELECT browser_jobs.id FROM browser_jobs JOIN drafts ON drafts.id = browser_jobs.draft_id WHERE drafts.product_id = ? AND browser_jobs.channel = ? AND browser_jobs.status = 'approved'").get(draft.productId, draft.channel)) throw new Error('같은 상품과 채널에 이미 승인된 작업이 있습니다.');
       if (this.db.prepare("SELECT id FROM browser_jobs WHERE draft_id = ? AND version = ? AND status = 'published'").get(draftId, draft.version)) throw new Error('이미 발행한 원고 버전은 다시 승인할 수 없습니다.');
       const id = randomUUID();
       this.db.prepare(`INSERT INTO browser_jobs (id, draft_id, version, channel, target, scheduled_at, status, result_url, message, updated_at, product_snapshot, use_work_tabs)
-        VALUES (?, ?, ?, ?, ?, ?, 'approved', '', ?, ?, ?, ?)`).run(id, draft.id, draft.version, draft.channel, target, schedule, '승인한 원고만 발행합니다.', new Date().toISOString(), productSnapshot(product), Number(settings.useWorkTabs));
-      this.event(id, '원고 버전과 발행 대상을 승인했습니다.');
+        VALUES (?, ?, ?, ?, ?, ?, 'approved', '', ?, ?, ?, ?)`).run(id, draft.id, draft.version, draft.channel, target, schedule, operation === 'threads_draft' ? '승인한 원고를 Threads 웹 초안으로만 저장합니다. 공개 게시는 사용자가 직접 진행합니다.' : '승인한 원고만 발행합니다.', new Date().toISOString(), productSnapshot(product), Number(settings.useWorkTabs));
+      if (operation === 'threads_draft') this.db.prepare('INSERT INTO threads_draft_intents (job_id, approved_checked_at) VALUES (?, ?)').run(id, product.checkedAt);
+      this.event(id, operation === 'threads_draft' ? '원고 버전과 계정의 Threads 웹 임시저장만 승인했습니다.' : '원고 버전과 발행 대상을 승인했습니다.');
       return this.publicJob(id);
     });
   }
@@ -353,6 +370,11 @@ export class Store {
     const result = this.atomic((): Job | string => {
       const job = this.job(jobId);
       if (job.status !== 'approved') throw new Error('승인 대기 중인 작업만 실행할 수 있습니다.');
+      if (job.channel === 'threads' && job.operation === 'publish') {
+        const reason = '이전 Threads 공개 게시 승인은 실행하지 않습니다. 웹 임시저장을 별도로 승인하세요.';
+        this.transition(jobId, 'needs_attention', reason, '', '이전 Threads 공개 게시 승인의 실행을 차단했습니다.');
+        return reason;
+      }
       if (this.db.prepare('SELECT paused FROM browser_preferences WHERE id = 1').get()!.paused === 1) throw new Error('자동 실행이 일시 중지되어 있습니다.');
       const now = Date.now();
       if (job.scheduledAt && Date.parse(job.scheduledAt) > now) throw new Error('아직 예약 시각이 되지 않았습니다.');
@@ -373,7 +395,7 @@ export class Store {
         this.transition(jobId, 'needs_attention', reason, '', '실행 전 검증에 실패하여 자동 실행을 차단했습니다.');
         return reason;
       }
-      const changed = this.db.prepare("UPDATE browser_jobs SET status = 'running', message = ?, updated_at = ? WHERE id = ? AND status = 'approved'").run('발행을 실행 중입니다. 자동 재시도하지 않습니다.', new Date().toISOString(), jobId);
+      const changed = this.db.prepare("UPDATE browser_jobs SET status = 'running', message = ?, updated_at = ? WHERE id = ? AND status = 'approved'").run(job.operation === 'threads_draft' ? 'Threads 웹 임시저장을 실행 중입니다. 공개 게시하거나 자동 재시도하지 않습니다.' : '발행을 실행 중입니다. 자동 재시도하지 않습니다.', new Date().toISOString(), jobId);
       if (changed.changes !== 1) throw new Error('다른 작업이 이미 실행을 시작했습니다.');
       this.event(jobId, '승인 작업의 실행을 시작했습니다.');
       return this.publicJob(jobId);
@@ -405,10 +427,62 @@ export class Store {
     this.atomic(() => {
       const job = this.job(jobId);
       if (job.status !== 'running') throw new Error('실행 중인 작업만 완료 처리할 수 있습니다.');
+      if (job.operation === 'threads_draft' && status === 'published') throw new Error('Threads 웹 임시저장은 공개 게시 완료가 아닙니다. 사용자 게시 후 공개 글을 확인하세요.');
       const publicUrl = status === 'published' ? resultUrl(url, job.channel, job.target) : '';
       if (status !== 'published' && url !== undefined && url !== '') throw new Error('게시 완료를 확인한 작업에만 게시 주소를 저장할 수 있습니다.');
       const event = status === 'published' ? '공개 게시 주소를 확인하여 발행 완료로 기록했습니다.' : status === 'uncertain' ? '게시 결과가 불명확하여 수동 확인이 필요합니다.' : '실행을 중단하여 재검토가 필요합니다.';
       this.transition(jobId, status, safeMessage, publicUrl, event);
+    });
+  }
+
+  threadsDraftProduct(jobId: string): Product {
+    identifier(jobId, '작업 ID');
+    return this.atomic(() => {
+      const job = this.job(jobId);
+      if (job.channel !== 'threads' || job.operation !== 'threads_draft' || !['running', 'uncertain', 'awaiting_publication'].includes(job.status)) throw new Error('진행 중이거나 저장된 Threads 임시저장 작업만 승인 상품을 확인할 수 있습니다.');
+      const snapshot = JSON.parse(job.productSnapshot) as unknown[];
+      const receipt = this.db.prepare('SELECT approved_checked_at AS checkedAt FROM threads_draft_intents WHERE job_id = ?').get(jobId)!;
+      const [id, name, sourceUrl, price, soldOut, facts, shareUrl] = snapshot;
+      return { id, name, sourceUrl, price, soldOut, facts, shareUrl, checkedAt: receipt.checkedAt } as Product;
+    });
+  }
+
+  markThreadsDraftSaved(jobId: string, previewStatus: 'visible' | 'unavailable'): void {
+    identifier(jobId, '작업 ID');
+    if (previewStatus !== 'visible' && previewStatus !== 'unavailable') throw new Error('링크 미리보기 확인 결과를 확인하세요.');
+    this.atomic(() => {
+      const job = this.job(jobId);
+      if (job.channel !== 'threads' || job.operation !== 'threads_draft') throw new Error('새 Threads 임시저장 작업만 저장 완료로 기록할 수 있습니다.');
+      if (!job.asideSessionId) throw new Error('연결된 Aside 작업의 저장 영수증이 필요합니다.');
+      const receipt = this.db.prepare('SELECT saved_at AS savedAt, preview_status AS previewStatus FROM threads_draft_intents WHERE job_id = ?').get(jobId)!;
+      if (receipt.savedAt !== null) {
+        if (job.status === 'awaiting_publication' && receipt.previewStatus === previewStatus) return;
+        throw new Error('이미 기록한 Threads 임시저장 영수증은 변경할 수 없습니다.');
+      }
+      if (job.status !== 'running' && job.status !== 'uncertain') throw new Error('실행 중이거나 결과가 불명확한 Threads 작업만 저장 완료로 기록할 수 있습니다.');
+      this.db.prepare('UPDATE threads_draft_intents SET saved_at = ?, preview_status = ? WHERE job_id = ?').run(new Date().toISOString(), previewStatus, jobId);
+      const message = 'Threads 웹 초안이 저장되었습니다. 아직 공개 게시되지 않았습니다. 모바일 앱에서 협찬 광고 레이블을 설정하고 직접 게시한 뒤 공개 주소를 확인하세요.';
+      this.transition(jobId, 'needs_attention', message, '', 'Threads 웹 임시저장을 확인했습니다. 사용자 공개 게시 대기 중입니다.');
+    });
+  }
+
+  completeThreadsPublication(jobId: string, url: string): void {
+    identifier(jobId, '작업 ID');
+    this.atomic(() => {
+      const job = this.job(jobId);
+      if (job.channel !== 'threads' || job.operation !== 'threads_draft' || job.status !== 'awaiting_publication') throw new Error('웹 초안 저장 후 사용자 게시 대기 중인 Threads 작업만 공개 게시를 확인할 수 있습니다.');
+      const publicUrl = resultUrl(url, 'threads', job.target);
+      this.transition(jobId, 'published', '사용자가 게시한 공개 글의 계정·원고·광고 문구·원본 링크를 확인했습니다.', publicUrl, '사용자가 게시한 Threads 공개 글을 검증하여 발행 완료로 기록했습니다.');
+    });
+  }
+
+  confirmDraftNotSaved(jobId: string): void {
+    identifier(jobId, '작업 ID');
+    this.atomic(() => {
+      const job = this.job(jobId);
+      if (job.channel !== 'threads' || job.operation !== 'threads_draft' || job.status !== 'uncertain') throw new Error('결과가 불명확한 Threads 임시저장 작업만 미저장을 확인할 수 있습니다.');
+      const message = '사용자가 원격 작업 중단·저장된 Threads 초안 없음·공개 글 없음을 모두 확인했습니다. 다시 저장하려면 새 승인이 필요합니다.';
+      this.transition(jobId, 'cancelled', message, '', message);
     });
   }
 
@@ -434,6 +508,7 @@ export class Store {
     identifier(jobId, '작업 ID');
     this.atomic(() => {
       const job = this.job(jobId);
+      if (job.operation === 'threads_draft') throw new Error('Threads 임시저장 작업은 웹 저장 결과와 사용자 공개 게시를 별도로 확인하세요.');
       if (job.status !== 'uncertain') throw new Error('게시 결과가 불명확한 작업만 수동 확인할 수 있습니다.');
       const publicUrl = resultUrl(url, job.channel, job.target);
       this.transition(jobId, 'published', '사용자가 공개 게시 주소를 확인했습니다.', publicUrl, '공개 게시 주소를 수동 확인하여 발행 완료로 기록했습니다.');
@@ -443,7 +518,9 @@ export class Store {
   confirmNotPublished(jobId: string): void {
     identifier(jobId, '작업 ID');
     this.atomic(() => {
-      if (this.job(jobId).status !== 'uncertain') throw new Error('게시 결과가 불명확한 작업만 미게시를 확인할 수 있습니다.');
+      const job = this.job(jobId);
+      if (job.operation === 'threads_draft') throw new Error('Threads 임시저장 작업은 원격 작업 중단·저장된 초안 없음·공개 글 없음을 모두 확인하세요.');
+      if (job.status !== 'uncertain') throw new Error('게시 결과가 불명확한 작업만 미게시를 확인할 수 있습니다.');
       const message = '사용자가 대상 채널에서 미게시를 확인했습니다. 재발행은 별도 승인이 필요합니다.';
       this.transition(jobId, 'cancelled', message, '', message);
     });

@@ -25,14 +25,16 @@ export class AppController {
     const state = this.store.state();
     const draft = state.drafts.find(d => d.id === job.draftId);
     if (!draft || draft.version !== job.version) throw new Error('원고 버전이 바뀌었습니다. 원본 글을 직접 확인하세요.');
-    return { requestId: job.id, draft, product: this.product(draft.productId), target: job.target,
+    return { requestId: job.id, draft, product: job.operation === 'threads_draft'
+      ? this.store.threadsDraftProduct(job.id) : this.product(draft.productId), target: job.target,
       useWorkTabs: state.settings.useWorkTabs, onSession: id => this.store.bindAsideSession(job.id, id) };
   }
   private async runJob(id: string): Promise<void> {
     const job = this.store.claim(id);
     try {
       const input = this.publication(job);
-      this.workflow.assertPublishable(input);
+      if (job.operation === 'threads_draft') this.workflow.assertDraftSaveable(input);
+      else this.workflow.assertPublishable(input);
       await this.browserFor(input.useWorkTabs).verifyProduct(input.product);
       if (this.store.state().paused) throw new Error('일시 정지되어 게시하지 않았습니다.');
     } catch (error) {
@@ -43,12 +45,19 @@ export class AppController {
       return;
     }
     try {
-      const result = await this.workflow.publish(this.publication(job));
-      this.store.finish(id, 'published', result.previewStatus === 'visible' ? '공개 글과 링크 미리보기를 확인했습니다.' : '공개 글을 확인했습니다. 사이트에서 링크 미리보기가 표시되지 않았습니다.', result.url);
+      if (job.operation === 'threads_draft') {
+        const result = await this.workflow.saveThreadsDraft(this.publication(job));
+        this.store.markThreadsDraftSaved(id, result.previewStatus);
+      } else {
+        const result = await this.workflow.publish(this.publication(job));
+        this.store.finish(id, 'published', result.previewStatus === 'visible' ? '공개 글과 링크 미리보기를 확인했습니다.' : '공개 글을 확인했습니다. 사이트에서 링크 미리보기가 표시되지 않았습니다.', result.url);
+      }
     } catch (error) {
       this.store.finish(id, 'uncertain', error instanceof PublicationBlockedError
         ? error.message
-        : 'Aside 작업이 계속 실행 중일 수 있습니다. 결과 확인 없이 다시 게시하지 마세요.');
+        : job.operation === 'threads_draft'
+          ? 'Aside 임시저장 작업이 계속 실행 중이거나 이미 저장됐을 수 있습니다. 웹 초안과 세션을 확인하기 전 다시 저장하지 마세요.'
+          : 'Aside 작업이 계속 실행 중일 수 있습니다. 결과 확인 없이 다시 게시하지 마세요.');
     }
   }
 
@@ -101,6 +110,11 @@ export class AppController {
         }
         case 'generate': {
           const product = this.product(command.productId);
+          const blockedDraftIds = new Set(state.jobs.filter(j => j.operation === 'threads_draft'
+            && ['running', 'uncertain', 'awaiting_publication'].includes(j.status)).map(j => j.draftId));
+          if (state.drafts.some(d => d.productId === product.id && blockedDraftIds.has(d.id))) {
+            throw new Error('Threads 웹 임시저장 결과 또는 사용자 게시를 먼저 확인하세요. 저장된 승인 원고를 다시 생성하지 않습니다.');
+          }
           if (product.soldOut || !product.shareUrl) throw new Error('판매 중 상품의 발급 링크가 필요합니다.');
           await browser.verifyProduct(product);
           const previous = state.drafts.map(d => d.title);
@@ -122,14 +136,37 @@ export class AppController {
           this.store.approve(command.draftId, command.scheduledAt);
           break;
         }
+        case 'approveThreadsDraft': {
+          const draft = state.drafts.find(d => d.id === command.draftId);
+          if (!draft || draft.channel !== 'threads') throw new Error('Threads 원고를 선택하세요.');
+          this.workflow.assertDraftSaveable({ requestId: randomUUID(), draft, product: this.product(draft.productId),
+            target: state.settings.threadsHandle, useWorkTabs: state.settings.useWorkTabs,
+            onSession: () => { throw new Error('승인 단계에서는 작업을 실행하지 않습니다.'); } });
+          this.store.approveThreadsDraft(command.draftId);
+          break;
+        }
         case 'runJob': await this.runJob(command.jobId); break;
         case 'checkJob': {
           const job = state.jobs.find(j => j.id === command.jobId);
           if (!job || job.status !== 'uncertain' || !job.asideSessionId) throw new Error('결과 확인할 Aside 작업이 없습니다.');
-          const result = await this.workflow.recover(job.asideSessionId, this.publication(job));
-          this.store.reconcile(job.id, result.url);
+          if (job.operation === 'threads_draft') {
+            const result = await this.workflow.recoverThreadsDraft(job.asideSessionId, this.publication(job));
+            this.store.markThreadsDraftSaved(job.id, result.previewStatus);
+          } else {
+            const result = await this.workflow.recover(job.asideSessionId, this.publication(job));
+            this.store.reconcile(job.id, result.url);
+          }
           break;
         }
+        case 'completeThreadsPublication': {
+          const job = state.jobs.find(j => j.id === command.jobId);
+          if (!job || job.operation !== 'threads_draft' || job.status !== 'awaiting_publication') throw new Error('사용자 게시 대기 중인 Threads 초안만 확인할 수 있습니다.');
+          const url = validateResultUrl(command.resultUrl, 'threads', job.target);
+          const result = await this.workflow.verifyThreadsPublication(this.publication(job), url);
+          this.store.completeThreadsPublication(job.id, result.url);
+          break;
+        }
+        case 'confirmDraftNotSaved': this.store.confirmDraftNotSaved(command.jobId); break;
         case 'cancelJob': this.store.cancel(command.jobId); break;
         case 'confirmNotPublished': this.store.confirmNotPublished(command.jobId); break;
         case 'reconcile': {
